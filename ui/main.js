@@ -3753,13 +3753,28 @@ function rowNote(main, text, kind = "note") {
   return note;
 }
 
-// A key is shown as a cap with a "Change" beside it, never as an editable
-// field: nobody types virtual key codes.
-function keycap(text, title) {
-  const cap = document.createElement("span");
+// A key is shown as a cap, never as an editable field: nobody types virtual
+// key codes.
+//
+// Pass `onRebind` and the cap *is* the control — a real button that starts the
+// capture, the way a game rebinds a control: click the key, then press the one
+// you want. Leave it out and the cap is a read-only span: the question a
+// running capture is asking is the only one built here today, and a readout
+// that is only ever read (the title bar's hint) is markup, not a call. The form
+// is decided by this argument and never by where the call came from, so a new
+// caller has to say which of the two it wants.
+function keycap(text, title, onRebind) {
+  const cap = document.createElement(onRebind ? "button" : "span");
   cap.className = "keycap";
   cap.textContent = text;
   if (title) cap.title = title;
+  if (onRebind) {
+    // Focusable and Enter/Space-activated for free, which is the whole reason
+    // this is a button and not a span with a click handler. No custom key
+    // handling anywhere near it.
+    cap.type = "button";
+    cap.addEventListener("click", onRebind);
+  }
   return cap;
 }
 
@@ -3773,37 +3788,70 @@ function textAction(label, title, onClick) {
   return button;
 }
 
-// One mode's row: what it does, the key it is bound to, a Change action, and
-// the switch that turns the mode off. All three send and nothing else — the
-// backend refuses to turn off the last mode, and the event it sends back is
-// what redraws the row either way.
+// One mode's row: what it does, the key it is bound to — which is also the
+// control that rebinds it — and, in Settings, the switch that turns the mode
+// off. Everything sends and nothing decides locally: the backend refuses to
+// turn off the last mode, and the event it sends back is what redraws the row
+// either way.
 const MODE_NOTE = {
   ptt: "Records only while the key is held.",
   toggle: "Press once to start, again to stop.",
 };
 
-function hotkeyRow(hotkey) {
+// What the cap says it will do, in its three states.
+const REBIND_TITLE = "Click, then press the key or mouse button you want";
+const REBIND_BUSY_TITLE = "Finish the key you are setting first";
+const CANCEL_TITLE = "Stop listening and keep the key you have";
+
+// The one key row, for Settings and for the wizard's key step. They differ in
+// their words and in whether the mode can be switched off — nothing else, and
+// least of all in how a capture reads, which is why this is one function.
+function keyRow(hotkey, { label, note, modeSwitch = false }) {
   const { row, main, control } = setRow("li");
-  rowLabel(main, MODE_LABEL[hotkey.mode] || hotkey.mode);
-  const note = MODE_NOTE[hotkey.mode];
+  rowLabel(main, label);
   if (note) rowNote(main, note);
 
   // Mid-rebind this one is the question: a dashed, empty slot rather than a
-  // stale key that is about to stop being true.
+  // stale key that is about to stop being true — and not a button, because
+  // there is nothing left to click here. Cancel is the way out.
   const awaiting = capturing() && lastSettings.capture_mode === hotkey.mode;
+  // Another row is already asking. One question at a time, exactly as the
+  // Settings pane enforces it — and said on the cap itself, because it is the
+  // control now.
+  const busy = capturing() && !awaiting;
   const cap = keycap(
     awaiting ? "Press a key…" : hotkey.label || "unset",
-    awaiting ? "" : `Saved in your config file as ${hotkey.token}`,
+    awaiting ? "" : busy ? REBIND_BUSY_TITLE : REBIND_TITLE,
+    awaiting
+      ? null
+      : () => {
+          invoke("hotkey_capture_start", { mode: hotkey.mode }).catch(
+            reportFailure,
+          );
+        },
   );
-  if (awaiting) cap.dataset.awaiting = "yes";
-
-  const change = textAction(
-    "Change",
-    "Press the key or button you want to use",
-    () => {
-      invoke("hotkey_capture_start", { mode: hotkey.mode }).catch(reportFailure);
-    },
-  );
+  if (awaiting) {
+    cap.dataset.awaiting = "yes";
+    // The row doing the asking: exempt from the pane's greying, and its cap
+    // and Cancel exempt from `setSettingsInert`.
+    row.dataset.awaiting = "yes";
+    cap.dataset.captureControl = "yes";
+  } else {
+    // In Settings `setSettingsInert` disables this along with everything else;
+    // the wizard has no such sweep, so the cap says it itself.
+    cap.disabled = busy;
+  }
+  control.append(cap);
+  if (awaiting) {
+    const cancel = textAction("Cancel", CANCEL_TITLE, () => {
+      invoke("hotkey_capture_cancel").catch(reportFailure);
+    });
+    cancel.dataset.captureControl = "yes";
+    control.append(cancel);
+  }
+  // The wizard's rows stop here: a mode is switched off in Settings, which is
+  // where the consequences of having none are explained.
+  if (!modeSwitch) return row;
 
   const toggle = document.createElement("label");
   toggle.className = "toggle";
@@ -3832,8 +3880,17 @@ function hotkeyRow(hotkey) {
   knob.setAttribute("aria-hidden", "true");
   toggle.append(box, knob);
 
-  control.append(cap, change, toggle);
+  control.append(toggle);
   return row;
+}
+
+// Settings' two rows: both modes, both switchable.
+function hotkeyRow(hotkey) {
+  return keyRow(hotkey, {
+    label: MODE_LABEL[hotkey.mode] || hotkey.mode,
+    note: MODE_NOTE[hotkey.mode],
+    modeSwitch: true,
+  });
 }
 
 function modelRow(model) {
@@ -4078,8 +4135,9 @@ function renderSettings(payload) {
   // The first-run panel lists the same folder from the same payload, so it is
   // refreshed by the same event — a rescan that finds a new file updates it
   // with no restart. It lives outside `#shell-settings`, so the inerting below
-  // never reaches it: a capture cannot happen in the empty phase anyway (there
-  // is no helper process running to capture with).
+  // never reaches it, and it has no capture control of its own: the repair
+  // panel lists models and nothing else. The wizard's key step is where a
+  // rebind happens in the empty phase, and it renders below.
   renderEmptyModels();
   // And the wizard, when it is the surface on screen: its mic picker, its key
   // caps and its model step are all drawn from this same event, which is what
@@ -4489,9 +4547,10 @@ function renderWizard() {
   renderWizardFooter();
 }
 
-// Whether this launch has a session behind it. The keys step and the model step
-// both turn on it, for different reasons: capture needs a control thread, and a
-// model that is already loaded needs no restart.
+// Whether this launch has a session behind it. Only the model step turns on it
+// now, and only because a model that is already loaded needs no restart — the
+// keys step works in both phases (task 052: the capture helper lives outside
+// the session, so a rebind in the empty phase spawns one of its own).
 function wizardHasSession() {
   return Boolean(lastStatus) && lastStatus.phase === "ready";
 }
@@ -4550,61 +4609,12 @@ function existingProject() {
 
 // 2 · the microphone, and 4 · the keys ---------------------------------------
 
-// Why Change is inert in the empty phase, said in one sentence. It goes in the
-// row's note as well as the `title`: a reason only a hover can find
-// is a reason nobody reads.
-const WIZARD_KEYS_LOCKED =
-  "Keys can be changed in Settings once a model is set up";
-
-// One key's row. The cap and the Change beside it are the Settings grammar
-// with one difference, and it is a real one: **in the empty phase there
-// is nothing to capture with**. Startup stopped before the helper process, so
-// there is no control thread to own a rebind — the row says so out loud rather
-// than offering a button that would send into a channel nobody is reading.
-function wizardKeyRow(hotkey, label, note) {
-  const { row, main, control } = setRow("li");
-  rowLabel(main, label);
-  const noteEl = rowNote(main, note);
-
-  const awaiting = capturing() && lastSettings.capture_mode === hotkey.mode;
-  const cap = keycap(
-    awaiting ? "Press a key…" : hotkey.label || "unset",
-    awaiting ? "" : `Saved in your config file as ${hotkey.token}`,
-  );
-  if (awaiting) cap.dataset.awaiting = "yes";
-  control.append(cap);
-
-  if (awaiting) {
-    control.append(
-      textAction("Cancel", "Stop listening and keep the key you have", () => {
-        invoke("hotkey_capture_cancel").catch(reportFailure);
-      }),
-    );
-    return row;
-  }
-
-  const change = textAction(
-    "Change",
-    "Press the key or button you want to use",
-    () => {
-      invoke("hotkey_capture_start", { mode: hotkey.mode }).catch(reportFailure);
-    },
-  );
-  if (!wizardHasSession()) {
-    change.disabled = true;
-    change.title = WIZARD_KEYS_LOCKED;
-    // Copy, not behaviour: the row now carries its own refusal instead of
-    // hiding it in a tooltip. Nothing about the disabling changed.
-    noteEl.textContent = `${note} ${WIZARD_KEYS_LOCKED}.`;
-  } else if (capturing()) {
-    // One question at a time, exactly as the Settings pane enforces it.
-    change.disabled = true;
-    change.title = "Finish the key you are setting first";
-  }
-  control.append(change);
-  return row;
-}
-
+// The wizard's two key rows are the Settings rows: the same renderer, the same
+// cap-is-the-control grammar, the same capture. What used to stand here was a
+// second copy of the row with its Change disabled, because in the empty phase
+// there was nothing to capture with — startup stopped before the helper
+// process. Task 052 moved the capture helper out of the session, so the empty
+// phase spawns its own one-shot helper and this row has nothing left to refuse.
 function renderWizardKeys() {
   const keys = el("wiz-keys");
   if (!lastSettings.toggle || !lastSettings.ptt) {
@@ -4612,16 +4622,14 @@ function renderWizardKeys() {
     return;
   }
   keys.replaceChildren(
-    wizardKeyRow(
-      lastSettings.toggle,
-      "Toggle recording",
-      "Press once to start, again to stop.",
-    ),
-    wizardKeyRow(
-      lastSettings.ptt,
-      "Push to talk",
-      "Records only while the key is held.",
-    ),
+    keyRow(lastSettings.toggle, {
+      label: "Toggle recording",
+      note: "Press once to start, again to stop.",
+    }),
+    keyRow(lastSettings.ptt, {
+      label: "Push to talk",
+      note: "Records only while the key is held.",
+    }),
   );
   // The question, in the card the two rows are in — the same row the Settings
   // pane raises, so a capture reads identically in both places.
@@ -4636,7 +4644,7 @@ function renderWizardKeys() {
       }…`,
     );
     control.append(
-      textAction("Cancel", "Stop listening and keep the key you have", () => {
+      textAction("Cancel", CANCEL_TITLE, () => {
         invoke("hotkey_capture_cancel").catch(reportFailure);
       }),
     );

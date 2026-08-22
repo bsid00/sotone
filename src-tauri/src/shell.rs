@@ -333,7 +333,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Error, Result};
 use serde::Serialize;
 use tauri::{
     AppHandle, CloseRequestApi, Emitter, LogicalSize, Manager, PhysicalPosition, State,
@@ -1430,8 +1430,9 @@ struct Inner {
     /// To the tray thread, same shape again.
     ///
     /// Separate from `inputs` for a third reason on top of those two: the tray
-    /// exists in the empty and fatal phases, where there *is* no control thread
-    /// to receive anything.
+    /// exists in the fatal phase, where there *is* no control thread to receive
+    /// anything, and in the empty phase, where the one that exists answers a
+    /// rebind and nothing else.
     tray: Mutex<Sender<TrayInput>>,
     /// Whether there is a tray icon at all.
     ///
@@ -2240,7 +2241,9 @@ impl ShellState {
 
     /// Send to the control thread, dropping the message if that thread is gone
     /// (a fatal startup leaves nobody listening, and that is not a new error to
-    /// report — the fatal status already said everything).
+    /// report — the fatal status already said everything). The empty phase
+    /// *does* listen: it answers a hotkey capture, so the wizard's key step
+    /// works before there is a session, and traces the rest away.
     fn send(&self, input: ShellInput) {
         let _ = lock(&self.inner.inputs).send(input);
     }
@@ -5676,16 +5679,6 @@ struct Session {
     /// and both of those are states the window is told about, because an app
     /// with no helper hears no key.
     hook: Option<HookProcess>,
-    /// The one-shot `--capture` helper, while a rebind is in progress. Second
-    /// in the drop order for the same reason `hook` is first: no key event may
-    /// arrive mid-teardown, and neither helper may outlive us.
-    capture: Option<HookProcess>,
-    /// Where `sotone-hook` lives, resolved once at startup so a respawn is not a
-    /// second chance to get the path wrong.
-    hook_path: PathBuf,
-    /// Handed to each new helper reader thread. The control thread's own
-    /// receiver is what they feed.
-    inputs: Sender<ShellInput>,
     engine: AudioEngine,
     worker: SessionWorker,
     cues: Option<Arc<CuePlayer>>,
@@ -5697,6 +5690,45 @@ struct Session {
     /// Clonable, holds no handle: used here to create/open/discard, and by the
     /// drain thread to re-list.
     store: DraftStore,
+}
+
+/// The rebind machinery, and it lives **outside** [`Session`] on purpose.
+///
+/// A capture is the one piece of helper lifecycle that has to work before there
+/// is a session to own it: with no model set up, startup stops before the
+/// microphone, whisper and the hook — the empty phase — and the wizard's key
+/// step is on screen in exactly that phase. So the control thread owns this for
+/// the app's whole life and hands it to the same four functions with or without
+/// a session. One state machine, both phases, rather than a second copy of it
+/// that would drift.
+struct CaptureSlot {
+    /// The one-shot `--capture` helper, while a rebind is in progress. Its
+    /// `Drop` is the same "no orphans" guarantee the ordinary helper carries,
+    /// and the control thread drops it before the session for the same reason
+    /// `hook` is first in `Session`'s field order: no key event may arrive
+    /// mid-teardown, and neither helper may outlive us.
+    helper: Option<HookProcess>,
+    /// Where `sotone-hook` lives, or why it could not be found — resolved once
+    /// on the control thread *before* startup branches, so a respawn is not a
+    /// second chance to get the path wrong and the empty phase has the path
+    /// too. Kept as the outcome rather than spent as a fatal: a broken install
+    /// with no model still has to reach the wizard, and [`init`] is what
+    /// refuses to start a *session* without a helper.
+    hook_path: Result<PathBuf, String>,
+    /// Handed to each helper reader thread. The control thread's own receiver
+    /// is what they feed.
+    inputs: Sender<ShellInput>,
+}
+
+impl CaptureSlot {
+    /// The helper to spawn, or the sentence to show instead of spawning it.
+    ///
+    /// # Errors
+    /// The install is broken: [`helper_path`]'s message, which names the path
+    /// it looked at.
+    fn hook_path(&self) -> Result<&Path, String> {
+        self.hook_path.as_deref().map_err(Clone::clone)
+    }
 }
 
 /// The wizard's frame, in **logical** pixels, as the design draws it.
@@ -5840,15 +5872,23 @@ fn run(
     input_tx: Sender<ShellInput>,
     input_rx: &Receiver<ShellInput>,
 ) {
-    let mut session = match init(app, state, input_tx) {
-        Ok(Some(session)) => session,
-        // The empty phase. Same shape as the fatal below — return,
-        // do not park — for the same reason: the window stays up, the status
-        // and the settings are already in the snapshot, and a thread sitting
-        // here would be a leak with no work to do. Commands that need the live
-        // session find nobody listening and drop their message, exactly as they
-        // do after a fatal; the panel simply never offers them.
-        Ok(None) => return,
+    // Resolved here rather than inside `init`, and this one move is what makes
+    // a rebind work in the wizard: startup stops before the helper when there
+    // is no model, so the empty phase would otherwise have no path to spawn a
+    // capture with. A broken install is still refused by `init`, with the same
+    // message and at the same point in startup.
+    let mut capture = CaptureSlot {
+        helper: None,
+        hook_path: helper_path().map_err(|err| format!("{err:#}")),
+        inputs: input_tx.clone(),
+    };
+
+    // The empty phase is `None` rather than a return: the window stays up on
+    // the wizard, and the wizard's key step is a surface this thread still
+    // owns. Everything else the loop below does asks for a session first and
+    // finds none, which is what a command sent into a dead channel used to get.
+    let mut session = match init(app, state, input_tx, capture.hook_path()) {
+        Ok(session) => session,
         Err(err) => {
             tracing::error!(error = ?err, "startup failed");
             state.set_status(app, StatusEvent::fatal(&err));
@@ -5860,8 +5900,13 @@ fn run(
         }
     };
 
-    state.emit_armed(app);
-    state.set_recording(app, RecordingEvent::IDLE);
+    // Both of these describe a session: whether it is armed, and that it is not
+    // recording. The empty phase has neither to say, and the status it already
+    // published is the whole truth about it.
+    if session.is_some() {
+        state.emit_armed(app);
+        state.set_recording(app, RecordingEvent::IDLE);
+    }
 
     let mut machine = Machine::default();
     let mut engine_dead = false;
@@ -5873,10 +5918,18 @@ fn run(
         // hook and the engine, so one repro press says which side lost the key.
         tracing::debug!(input = ?input, "control input");
         match input {
+            // Every branch but the settings one needs the session, and the
+            // empty phase has none: no hook to send a key, no worker to hand a
+            // draft to. Those arrive from surfaces that phase never offers, so
+            // what happens without a session is the trace above and nothing
+            // more.
             ShellInput::Key(key) => {
+                let Some(session) = session.as_ref() else {
+                    continue;
+                };
                 let action = machine.apply(key, state.capture_live(), Instant::now());
                 tracing::debug!(action = ?action, "control action");
-                perform(app, state, &session, action);
+                perform(app, state, session, action);
             }
             // Not a notice any more: the hook being gone is permanent
             // until something puts it back, and a permanent state announced
@@ -5890,13 +5943,20 @@ fn run(
                 );
             }
             ShellInput::Draft(request) => {
-                perform_draft(app, state, &session, machine.is_recording(), request);
+                let Some(session) = session.as_ref() else {
+                    continue;
+                };
+                perform_draft(app, state, session, machine.is_recording(), request);
             }
+            // The one request that is answered in both phases, which is why it
+            // takes the capture slot and an *optional* session rather than
+            // being written twice.
             ShellInput::Settings(request) => {
                 perform_settings(
                     app,
                     state,
-                    &mut session,
+                    &mut capture,
+                    session.as_mut(),
                     machine.is_recording(),
                     &mut engine_dead,
                     request,
@@ -5907,8 +5967,11 @@ fn run(
                 // thread must not open a second one. The frontend already
                 // hides the editing controls while a recording is live, and
                 // the worker applies these between utterances either way.
+                let Some(session) = session.as_ref() else {
+                    continue;
+                };
                 send_draft(
-                    &session,
+                    session,
                     match request {
                         LineInput::Edit { id, text } => SessionCommand::EditLine { id, text },
                         LineInput::Move { id, after } => SessionCommand::MoveLine { id, after },
@@ -5932,7 +5995,11 @@ fn run(
         }
 
         // Cheap, and the alternative is a session that looks alive while the
-        // microphone has been gone for ten minutes.
+        // microphone has been gone for ten minutes. Nothing to poll without
+        // one: the empty phase never opened a device.
+        let Some(session) = session.as_mut() else {
+            continue;
+        };
         if !engine_dead {
             if let EngineStatus::Dead { reason } = session.engine.status() {
                 engine_dead = true;
@@ -5957,6 +6024,11 @@ fn run(
         }
     }
 
+    // Spelled out, and in this order, now that the capture helper lives outside
+    // the session: the one-shot goes first for the same reason the hook is
+    // first inside `Session` — no key event may arrive mid-teardown, and
+    // neither helper may outlive this thread.
+    drop(capture);
     drop(session);
 }
 
@@ -6633,13 +6705,20 @@ fn drafts_event(
 
 /// Carry out one settings request.
 ///
+/// `session` is `None` in the empty phase, where there is no engine, no worker
+/// and no hook — only a capture, which is why this takes an `Option` rather
+/// than being written twice. The capture branches read as they always did,
+/// minus a helper there was never anything to stop or put back; every other
+/// branch asks for a session and says what it does without one.
+///
 /// `engine_dead` is the control loop's "already reported" latch, borrowed
 /// because a device change is the one thing that can both *cause* it and
 /// *clear* it.
 fn perform_settings(
     app: &AppHandle,
     state: &ShellState,
-    session: &mut Session,
+    capture: &mut CaptureSlot,
+    session: Option<&mut Session>,
     recording: bool,
     engine_dead: &mut bool,
     request: SettingsInput,
@@ -6654,17 +6733,17 @@ fn perform_settings(
                 );
                 return;
             };
-            start_capture(app, state, session, recording, mode);
+            start_capture(app, state, capture, session, recording, mode);
         }
 
         SettingsInput::CaptureCancel => {
-            if session.capture.take().is_none() {
+            if capture.helper.take().is_none() {
                 return;
             }
             state.set_capture(None);
             // Straight back to the bindings the config already had: cancelling
             // changed nothing, so nothing needs writing.
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
             state.refresh_settings(app);
         }
 
@@ -6675,13 +6754,13 @@ fn perform_settings(
                 tracing::debug!(token, "a captured key arrived after the capture ended");
                 return;
             };
-            session.capture = None;
+            capture.helper = None;
             state.set_capture(None);
-            apply_capture(app, state, session, mode, &token);
+            apply_capture(app, state, capture, session, mode, &token);
         }
 
         SettingsInput::CaptureEnded { reason } => {
-            if session.capture.take().is_none() {
+            if capture.helper.take().is_none() {
                 return;
             }
             state.set_capture(None);
@@ -6690,24 +6769,36 @@ fn perform_settings(
                 NoticeLevel::Warn,
                 format!("the key capture stopped before you pressed anything ({reason})"),
             );
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
             state.refresh_settings(app);
         }
 
         SettingsInput::Rehook => {
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
             state.refresh_settings(app);
         }
 
         SettingsInput::SetCues(on) => {
+            // The control thread's half of the switch is the atomic, and it is
+            // set either way; the worker's half only exists with a session, and
+            // without one the config the command has already written is what
+            // the first session starts from.
             state.set_cues_enabled(on);
-            send_draft(session, SessionCommand::SetCues(on));
+            if let Some(session) = session {
+                send_draft(session, SessionCommand::SetCues(on));
+            }
         }
 
         // The device change itself. The command already wrote the
         // config and already refused this while a recording was live; what is
         // left is the part only this thread can do.
         SettingsInput::SetMic(device) => {
+            // No engine to reconnect to in the empty phase. The command has
+            // already written the choice, so the device the file now names is
+            // the one the first session opens.
+            let Some(session) = session else {
+                return;
+            };
             // Belt and braces: a recording that went live between the command's
             // check and this message would otherwise lose its tail to the
             // teardown. The engine keeps capturing on the device it has.
@@ -6753,11 +6844,18 @@ fn perform_settings(
         // Hand-over to the worker. Loaded and warmed by the loading thread —
         // nothing here blocks, and nothing here can fail.
         SettingsInput::SetTranscriber(transcriber) => {
-            send_draft(session, SessionCommand::SetTranscriber(transcriber));
+            // Both of these are hand-overs to the worker, and the empty phase
+            // has no worker: nothing there can have loaded a model or chosen a
+            // language, so nothing there sends them.
+            if let Some(session) = session {
+                send_draft(session, SessionCommand::SetTranscriber(transcriber));
+            }
         }
 
         SettingsInput::SetLanguage(language) => {
-            send_draft(session, SessionCommand::SetLanguage(language));
+            if let Some(session) = session {
+                send_draft(session, SessionCommand::SetLanguage(language));
+            }
         }
     }
 }
@@ -6817,10 +6915,16 @@ fn ready_device(outcome: &Reconnect) -> String {
 const NO_MICROPHONE: &str = "no microphone";
 
 /// Shut the ordinary helper down and start a `--capture` one.
+///
+/// With no session there is no ordinary helper to shut down — the empty phase
+/// never started one — so the first half is a no-op and the rest is unchanged.
+/// That is the whole of the difference between a rebind in Settings and the
+/// same rebind on the wizard's key step.
 fn start_capture(
     app: &AppHandle,
     state: &ShellState,
-    session: &mut Session,
+    capture: &mut CaptureSlot,
+    mut session: Option<&mut Session>,
     recording: bool,
     mode: HotkeyMode,
 ) {
@@ -6834,7 +6938,7 @@ fn start_capture(
         );
         return;
     }
-    if session.capture.is_some() {
+    if capture.helper.is_some() {
         state.notice(
             app,
             NoticeLevel::Warn,
@@ -6846,11 +6950,17 @@ fn start_capture(
     // There is one hook, so the helper watching the bindings has to go before
     // the capture helper arrives. Push-to-talk and toggle are dead from here
     // until the capture ends, deliberately, and the panel says so.
-    stop_helper(session);
+    stop_helper(session.as_deref_mut());
 
-    match spawn_capture_helper(&session.hook_path) {
+    // The install's own failure, carried since startup rather than asked again
+    // here: with a session in hand this cannot be an error at all, because
+    // `init` refused to build one without a helper.
+    let outcome = capture
+        .hook_path()
+        .and_then(|path| spawn_capture_helper(path).map_err(|err| format!("{err:#}")));
+    match outcome {
         Ok(child) => {
-            session.capture = Some(read_capture(&session.inputs, child));
+            capture.helper = Some(read_capture(&capture.inputs, child));
             state.set_capture(Some(mode));
             state.refresh_settings(app);
         }
@@ -6858,20 +6968,26 @@ fn start_capture(
             state.notice(
                 app,
                 NoticeLevel::Error,
-                format!("could not start the key capture: {err:#}"),
+                format!("could not start the key capture: {err}"),
             );
-            // Hookless is not a state this app is ever left in.
-            respawn_helper(app, state, session);
+            // Hookless is not a state this app is ever left in — and the empty
+            // phase was hookless before this, which the window already says.
+            respawn_helper(app, state, capture, session);
             state.refresh_settings(app);
         }
     }
 }
 
 /// Write a captured binding into the configuration and make it live.
+///
+/// "Live" is the session's half, and it is the half the empty phase does not
+/// have: there the file *is* the whole of it, and the launch that finishes the
+/// wizard reads the keys back out of it (see [`rebind`]).
 fn apply_capture(
     app: &AppHandle,
     state: &ShellState,
-    session: &mut Session,
+    capture: &CaptureSlot,
+    session: Option<&mut Session>,
     mode: HotkeyMode,
     token: &str,
 ) {
@@ -6882,7 +6998,7 @@ fn apply_capture(
         Ok(binding) => binding,
         Err(err) => {
             state.notice(app, NoticeLevel::Warn, format!("{err}"));
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
             state.refresh_settings(app);
             return;
         }
@@ -6891,25 +7007,7 @@ fn apply_capture(
     // spelling and not whatever came off the wire.
     let token = binding.to_string();
 
-    let outcome = state.edit_config(|config| {
-        let (ptt, toggle) = match mode {
-            HotkeyMode::Ptt => (token.as_str(), config.toggle_hotkey.as_str()),
-            HotkeyMode::Toggle => (config.hotkey.as_str(), token.as_str()),
-        };
-        // The same rule `Config::load` applies: two enabled modes may not share
-        // a binding. Asked *before* the write, because a settings screen that
-        // can save a config the next launch refuses is a trap with no way out.
-        if let Some(problem) =
-            recording_mode_problem(ptt, toggle, config.ptt_enabled, config.toggle_enabled)
-        {
-            return Ok(Some(problem));
-        }
-        match mode {
-            HotkeyMode::Ptt => config.hotkey = token.clone(),
-            HotkeyMode::Toggle => config.toggle_hotkey = token.clone(),
-        }
-        Ok(None)
-    });
+    let outcome = state.edit_config(|config| Ok(rebind(config, mode, &token)));
 
     match outcome {
         Ok(None) => {
@@ -6918,7 +7016,7 @@ fn apply_capture(
             // that already says what the user chose, so the next launch is
             // right — where the other order would leave a running helper
             // watching a key the file has never heard of.
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
             // The keycap in the row and the title bar's key hint both now read
             // the new binding, so the sentence is log-only.
             state.notice(
@@ -6929,7 +7027,7 @@ fn apply_capture(
         }
         Ok(Some(problem)) => {
             state.notice(app, NoticeLevel::Warn, problem);
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
         }
         Err(err) => {
             state.notice(
@@ -6937,14 +7035,46 @@ fn apply_capture(
                 NoticeLevel::Error,
                 format!("could not save the new hotkey: {err}"),
             );
-            respawn_helper(app, state, session);
+            respawn_helper(app, state, capture, session);
         }
     }
     state.refresh_settings(app);
 }
 
+/// Write one captured binding into a configuration, or say why it cannot be.
+///
+/// Split out of [`apply_capture`] so the rule can be read — and tested —
+/// without a helper process or an `AppHandle`: this is the whole of what a
+/// rebind changes, and the file it changes is what the next launch resolves its
+/// bindings from. That matters most in the empty phase, where finishing the
+/// wizard restarts the app and this write is the only trace the rebind leaves.
+fn rebind(config: &mut Config, mode: HotkeyMode, token: &str) -> Option<String> {
+    let (ptt, toggle) = match mode {
+        HotkeyMode::Ptt => (token, config.toggle_hotkey.as_str()),
+        HotkeyMode::Toggle => (config.hotkey.as_str(), token),
+    };
+    // The same rule `Config::load` applies: two enabled modes may not share a
+    // binding. Asked *before* the write, because a settings screen that can
+    // save a config the next launch refuses is a trap with no way out.
+    if let Some(problem) =
+        recording_mode_problem(ptt, toggle, config.ptt_enabled, config.toggle_enabled)
+    {
+        return Some(problem);
+    }
+    match mode {
+        HotkeyMode::Ptt => config.hotkey = token.to_owned(),
+        HotkeyMode::Toggle => config.toggle_hotkey = token.to_owned(),
+    }
+    None
+}
+
 /// Stop whatever helper is running, so there is exactly one hook at a time.
-fn stop_helper(session: &mut Session) {
+///
+/// Nothing to stop without a session: the empty phase never started one.
+fn stop_helper(session: Option<&mut Session>) {
+    let Some(session) = session else {
+        return;
+    };
     if let Some(hook) = session.hook.take() {
         // The existing discipline: drop its stdin, wait, then kill. Its
         // supervisor thread sees `stopping` and does not restart it.
@@ -6958,8 +7088,22 @@ fn stop_helper(session: &mut Session) {
 /// failure here is not a notice any more but a [`Condition::HotkeyDead`]:
 /// the app still runs and no key press will ever be seen, which is a state that
 /// holds rather than a moment that passed.
-fn respawn_helper(app: &AppHandle, state: &ShellState, session: &mut Session) {
-    stop_helper(session);
+///
+/// With no session this does nothing at all, and that is what lets one state
+/// machine serve both phases: "capture can never leave the app hookless" is
+/// still true of a phase that was hookless before the capture started. Starting
+/// a helper there would arm keys with no engine behind them, on a window whose
+/// wizard is still saying the app is not set up yet.
+fn respawn_helper(
+    app: &AppHandle,
+    state: &ShellState,
+    capture: &CaptureSlot,
+    session: Option<&mut Session>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    stop_helper(Some(session));
 
     let bindings = match state.bindings() {
         Ok(bindings) => bindings,
@@ -6968,14 +7112,18 @@ fn respawn_helper(app: &AppHandle, state: &ShellState, session: &mut Session) {
             return;
         }
     };
+    // Unreachable with a session in hand — `init` refuses to build one without
+    // a helper — and still not worth a panic: the condition below is the state
+    // a failed respawn leaves, said in the same place.
+    let path = match capture.hook_path() {
+        Ok(path) => path,
+        Err(err) => {
+            state.set_condition(app, Condition::HotkeyDead, err);
+            return;
+        }
+    };
 
-    match start_hook(
-        app,
-        state,
-        session.inputs.clone(),
-        &session.hook_path,
-        bindings,
-    ) {
+    match start_hook(app, state, capture.inputs.clone(), path, bindings) {
         Ok(hook) => {
             tracing::info!(bindings = %describe_bindings(bindings), "hotkey helper restarted");
             session.hook = Some(hook);
@@ -7417,11 +7565,18 @@ fn read_helper(input_tx: &Sender<ShellInput>, stdout: ChildStdout) -> bool {
 /// `Ok(None)` is the **empty phase**: no model could be resolved, so
 /// there is no session to hand back — and that is not an error. The status and
 /// the settings have already been published by the time it returns, exactly as
-/// a fatal publishes its own status; the caller simply has nothing left to do.
+/// a fatal publishes its own status; the caller keeps its loop for the one
+/// thing that still has an owner there, a hotkey capture (the wizard's key
+/// step is on screen in exactly this phase).
+///
+/// `hook_path` is the control thread's one resolution of where `sotone-hook`
+/// lives, passed in rather than made here: this is where it becomes fatal,
+/// because a session without a helper is an app that can never record.
 fn init(
     app: &AppHandle,
     state: &ShellState,
     input_tx: Sender<ShellInput>,
+    hook_path: Result<&Path, String>,
 ) -> Result<Option<Session>> {
     state.set_status(app, StatusEvent::loading("reading the configuration"));
     let config_path = default_config_path().context("could not work out where the config lives")?;
@@ -7595,15 +7750,18 @@ fn init(
     }
 
     state.set_status(app, StatusEvent::loading("listening for the hotkeys"));
-    // Resolved once, here, so a respawn after a rebind is not a second chance
-    // to get the path wrong — and so a broken install still fails at startup,
-    // with the message that names the path it looked at.
-    let hook_path = helper_path()?;
+    // Resolved once by the control thread before startup branched, so a respawn
+    // after a rebind is not a second chance to get the path wrong. It is *spent*
+    // here, where a broken install still fails startup with the message that
+    // names the path it looked at — the empty phase, which never reaches this
+    // line, keeps the outcome instead and refuses a capture with the same
+    // sentence.
+    let hook_path = hook_path.map_err(Error::msg)?;
     // The hook lives in `sotone-hook.exe`; this only starts it and reads its
     // pipe. Everything else — cues, engine calls, emits — happens on the
     // control thread, which owns them (`AudioEngine` is not `Sync`, so this is
     // the only sound way to share it anyway).
-    let hook = start_hook(app, state, input_tx.clone(), &hook_path, bindings)?;
+    let hook = start_hook(app, state, input_tx, hook_path, bindings)?;
 
     spawn_drain(app.clone(), state.clone(), store.clone(), events);
 
@@ -7650,9 +7808,6 @@ fn init(
 
     Ok(Some(Session {
         hook: Some(hook),
-        capture: None,
-        hook_path,
-        inputs: input_tx,
         engine,
         worker,
         cues,
@@ -8665,6 +8820,47 @@ mod tests {
         assert_eq!(recording_mode_problem("MouseX1", "F14", true, true), None);
     }
 
+    /// A rebind in the **empty phase** has nowhere to be applied: there is no
+    /// helper to respawn and no session to tell, and finishing the wizard
+    /// restarts the app. So the file is the whole of it, and this is the round
+    /// trip that has to hold for the wizard's key step to mean anything — the
+    /// same two functions the next launch calls, in the order it calls them.
+    ///
+    /// Filesystem, like the project group below and under the same guard: a
+    /// config file this test alone owns, in the OS temp directory. No
+    /// `AppHandle`, no helper process, no device.
+    #[test]
+    fn a_rebind_is_what_the_next_launch_resolves_its_bindings_from() {
+        let tree = TempTree::new("rebind");
+        let path = tree.path().join("config.toml");
+        // A missing file writes the defaults, exactly as startup does.
+        let mut config = Config::load(&path).expect("the defaults are written");
+        assert_eq!(config.hotkey, "F13");
+
+        assert_eq!(rebind(&mut config, HotkeyMode::Ptt, "MouseX1"), None);
+        config.save(&path).expect("the rebind is written");
+
+        let next = Config::load(&path).expect("the next launch reads its own file");
+        let bindings = resolve_bindings(&next, &path).expect("both modes still resolve");
+        let captured = "MouseX1"
+            .parse::<Binding>()
+            .expect("a captured token parses");
+        assert_eq!(bindings.ptt, Some(captured));
+        // The mode that was not rebound is untouched, in the file and in what
+        // the helper would be told to watch.
+        assert_eq!(next.toggle_hotkey, "F14");
+        assert_eq!(
+            bindings.toggle,
+            Some("F14".parse::<Binding>().expect("the default parses"))
+        );
+
+        // And a refusal writes nothing: two enabled modes may not share a
+        // binding, so the file never grows one the next load would reject.
+        let mut clash = next;
+        assert!(rebind(&mut clash, HotkeyMode::Ptt, "F14").is_some());
+        assert_eq!(clash.hotkey, "MouseX1", "a refused rebind changes nothing");
+    }
+
     /// Mouse bindings are unreadable as tokens; everything else reads as
     /// itself. The token, not the label, is what is written to the file.
     #[test]
@@ -9437,7 +9633,7 @@ mod tests {
     #[test]
     fn the_suggested_notes_root_is_a_path_the_window_can_show() {
         let root = onboarding_notes_root();
-        assert!(root.ends_with("Sotone Notes"), "{root}");
+        assert!(root.ends_with("Sotone"), "{root}");
     }
 
     // -----------------------------------------------------------------------

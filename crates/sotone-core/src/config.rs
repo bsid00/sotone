@@ -969,7 +969,7 @@ pub fn default_models_dir() -> PathBuf {
     )
 }
 
-/// Where the onboarding wizard offers to keep notes: `<documents>/Sotone Notes`.
+/// Where the onboarding wizard offers to keep notes: `<documents>/Sotone`.
 ///
 /// **An invention**: there is no notes root in the
 /// configuration — a project's `notes_dir` is an arbitrary folder the user
@@ -983,10 +983,9 @@ pub fn default_models_dir() -> PathBuf {
 /// neither gets a relative path rather than stopping the app.
 #[must_use]
 pub fn default_notes_root() -> PathBuf {
-    dirs::document_dir().or_else(dirs::home_dir).map_or_else(
-        || PathBuf::from("Sotone Notes"),
-        |dir| dir.join("Sotone Notes"),
-    )
+    dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .map_or_else(|| PathBuf::from("Sotone"), |dir| dir.join("Sotone"))
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -1652,10 +1651,12 @@ session_dividers = false
     #[test]
     fn the_wizards_notes_root_is_a_suggestion_under_a_real_folder() {
         let root = default_notes_root();
-        assert!(root.ends_with("Sotone Notes"), "{}", root.display());
+        // The app's name and nothing more: this folder holds the projects, and
+        // "Notes" on the end read as a second word for the same thing.
+        assert!(root.ends_with("Sotone"), "{}", root.display());
         // Absolute on any machine that reports a documents or home folder,
         // relative only on one that reports neither — never a panic.
-        assert!(root.is_absolute() || root == Path::new("Sotone Notes"));
+        assert!(root.is_absolute() || root == Path::new("Sotone"));
     }
 
     #[test]

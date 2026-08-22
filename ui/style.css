@@ -3291,13 +3291,22 @@ select[data-enhanced="yes"] {
    convention for the UI font in a padded box, and the `font` shorthand's own
    reset to `normal` is the centring convention for mono. The box grows to the
    font's natural ~30px; it is flex-centred in a row the `Choose…` button
-   already sizes, and nothing measures against its height. */
+   already sizes, and nothing measures against its height.
+
+   And then the measured remainder (task 052). `normal` halved the error, it did
+   not end it: the path's ink still rode 0.38px high in a 30.0px box, beside a
+   `Choose…` button centred to a tenth of a pixel — half a device pixel at 125%,
+   which is what the owner saw and called "the centering is gone". So the 043
+   convention, with its sign reversed for mono: Segoe ink sits low and gets
+   `--ink-up-125` lifted, Cascadia ink sits high and gets the same number
+   dropped. Subtracted below and added above, so the border-box height does not
+   move — it is still 30.0. */
 .wiz-path__value {
   display: inline-flex;
   align-items: center;
   flex: 1;
   min-width: 0;
-  padding: 7px 11px;
+  padding: calc(7px + var(--ink-up-125)) 11px calc(7px - var(--ink-up-125));
   background: var(--panel-high);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-ctl);
@@ -3766,8 +3775,11 @@ select[data-enhanced="yes"] {
 
 /* One question at a time: while the helper is listening for a key, everything
    else in the view is inert. The controls are really disabled — this only says
-   so — and the row doing the asking stays at full brightness. */
-#pane-settings[data-capturing="yes"] .set-row:not(.set-row--ask),
+   so — and the rows doing the asking stay at full brightness. There are two of
+   them since task 052: the `--ask` row, and the key row whose own cap is now
+   the question ("Press a key…" is unreadable at 0.45). */
+#pane-settings[data-capturing="yes"]
+  .set-row:not(.set-row--ask):not([data-awaiting="yes"]),
 #pane-settings[data-capturing="yes"] .set-section__note {
   opacity: 0.45;
 }
@@ -3928,8 +3940,47 @@ select[data-enhanced="yes"] {
   color: var(--text);
 }
 
+/* The same cap as a control (task 052): click the key to rebind it, the way a
+   game's settings screen does it. `button.keycap` and not a class of its own —
+   the cap is one object and this is the form of it that can be pressed, so the
+   only declarations here are the ones a button needs and does not inherit. */
+button.keycap {
+  /* Without this the platform paints its own button over the cap's fill and
+     hairline; `.keycap` above owns both. Everything else a button brings —
+     focusability, Enter/Space, `:disabled` — is exactly what is wanted. */
+  appearance: none;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+/* Grays, never the accent: red means a live recording in this window and
+   nothing else. One step up on both the fill and the hairline is the whole
+   hover state. */
+button.keycap:hover:not(:disabled),
+button.keycap:focus-visible {
+  background: var(--sel);
+  border-color: var(--dim);
+}
+
+/* And the keyboard gets a ring on top of that fill — the toggle's ring, in the
+   grays, rather than the UA's own (it is blue, and there is no blue in this
+   window). */
+button.keycap:focus-visible {
+  outline: 1px solid var(--dim);
+  outline-offset: 2px;
+}
+
+/* The one case where a cap reads inert: another row is already asking for a
+   key. `--faint` is the same mark every disabled control in this file carries. */
+button.keycap:disabled {
+  cursor: default;
+  color: var(--faint);
+  border-color: var(--line);
+}
+
 /* The slot while the helper is listening for this one: dashed, empty, and
-   plainly waiting. */
+   plainly waiting. Never a button — there is nothing left to click on it, and
+   Cancel beside it is the way out. */
 .keycap[data-awaiting="yes"] {
   background: none;
   border-style: dashed;

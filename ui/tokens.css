@@ -53,7 +53,14 @@
   --radius: 10px;      /* cards, panels, popovers */
   --radius-ctl: 9px;   /* buttons, inputs */
 
-  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  /* Named faces, and `ui-monospace` deliberately *not* first: the generic
+     resolves to whatever the engine currently calls its UI monospace, and an
+     Evergreen WebView2 update can change that answer under an install nobody
+     touched. The centring below is measured against real glyph metrics, so a
+     family that can change on its own is a centring that can drift on its own.
+     Pinned, so the metrics cannot move unless this line does. (It resolves to
+     Cascadia Mono on Windows either way today — measured, task 052.) */
+  --mono: "Cascadia Mono", Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 
   /* Ink centring, defined here so every page shares one
@@ -64,6 +71,8 @@
      subtract the token above and add it below, so border-box heights never
      move. One number per font size, never a per-element hand-tune. */
   --ink-up-125: 0.4px; /* 12.5px sans controls (and the 12px sort value) */
+  /* One number, two directions: sans ink sits low and is lifted by it, mono
+     ink sits high and is dropped by it (`.wiz-path__value`, task 052). */
   --ink-up-13: 0.75px; /* 13px sans controls */
 }
 
@@ -123,7 +132,8 @@
 
   --sans: system-ui, "Adwaita Sans", Cantarell, sans-serif;
   /* The two faces a GNOME box actually has, ahead of the generic fallback.
-     The Windows faces stay in the list and simply never match there. */
-  --mono: ui-monospace, "Cascadia Mono", Consolas, "Source Code Pro",
-    "DejaVu Sans Mono", monospace;
+     The Windows faces stay in the list and simply never match there, and
+     `ui-monospace` is off the front for the reason given above. */
+  --mono: "Cascadia Mono", Consolas, "Source Code Pro", "DejaVu Sans Mono",
+    monospace;
 }
