@@ -51,27 +51,37 @@
 //!    called `SetForegroundWindow` on its own hidden helper window before
 //!    `TrackPopupMenu` (Microsoft's documented shell pattern, not
 //!    opt-outable). The glass menu keeps exactly that behaviour and no more:
-//!    a **right-click** on the icon shows the `traymenu` window and focuses
-//!    it — deliberately, because losing that focus IS the dismissal (the page
-//!    closes on blur, the native menu's own semantics). User-initiated, one
-//!    call site, in [`Tray::place_and_show`]. Nothing restores focus when the
+//!    a **right-click** on the icon shows the `traymenu` window and asks for
+//!    the foreground — deliberately, because losing it IS the dismissal (the
+//!    page closes on blur, the native menu's own semantics). User-initiated,
+//!    one caller, [`Tray::place_and_show`]. Nothing restores focus when the
 //!    menu closes — the OS hands it back the way it always has.
-//! 2. **`show()` + `set_focus()` on "Open Sotone", a recent note, and
+//! 2. **`show()` + [`bring_forward`] on "Open Sotone", a recent note, and
 //!    Settings.** The user asked for the window by clicking a menu item that
 //!    says so; `show()` alone does not restore the foreground on Windows.
 //!    A **double left-click on the icon** also enters
 //!    this same carve-out: [`icon_input`] answers it with the very
 //!    [`MenuAction::Open`] the "Open Sotone" row sends, so it is the existing
-//!    path asked for without the menu — not a third focus site.
-//!    `grep -rn set_focus src-tauri/` must find exactly **two** call sites,
-//!    both in this file — [`open_window`] and [`Tray::place_and_show`] — and
-//!    prose everywhere else. No capture path, no overlay path and no event
-//!    handler can reach either.
+//!    path asked for without the menu — not a third focus site. So is an
+//!    **exe relaunch**: the second process signals this one and exits, and
+//!    the single-instance callback in `main.rs` sends that same
+//!    [`MenuAction::Open`].
+//!    `grep -rn SetForegroundWindow src-tauri/` must find exactly **one**
+//!    call site — [`bring_forward`], in this file — with exactly **two**
+//!    callers, [`open_window`] and [`Tray::place_and_show`], and prose
+//!    everywhere else. No capture path, no overlay path and no event
+//!    handler can reach any of the three.
 //!
 //! # Invariant 1
 //!
 //! Nothing here generates input. A menu click is an observation like a key
-//! press: it arrives, it is enqueued, it is answered.
+//! press: it arrives, it is enqueued, it is answered. **That is why both
+//! carve-outs call `SetForegroundWindow` themselves rather than tauri's
+//! `set_focus`**, which is banned repo-wide since task 055: on Windows tao
+//! answers `set_focus` with `force_window_active`, and that function fakes a
+//! left-Alt press and release with `SendInput` whenever Windows refuses the
+//! foreground — invariant 1 broken one crate down, in whatever fullscreen
+//! game is in front. [`bring_forward`] carries the rule and the reasoning.
 //!
 //! # The glass menu
 //!
@@ -100,7 +110,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::image::Image;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WebviewWindow};
 
 use crate::shell::{self, Condition, DraftsEvent, Phase, ShellState};
 
@@ -1125,14 +1135,14 @@ impl Tray {
         }
     }
 
-    /// The page measured itself: size, place, show, focus.
+    /// The page measured itself: size, place, show, front.
     ///
     /// Size is asked for in logical units and position in physical, on the
     /// primary monitor's scale — the overlay's split exactly, and for the
     /// overlay's reasons (one unit per number, and the work area is
-    /// physical). **The second of the two focus carve-outs' call sites** (the
-    /// module header has the story): the menu takes focus so that losing it
-    /// can dismiss it.
+    /// physical). **The second of the two focus carve-outs' callers** (the
+    /// module header has the story): the menu takes the foreground so that
+    /// losing it can dismiss it.
     fn place_and_show(&mut self, width: f64, height: f64) {
         let Some(anchor) = self.anchor else {
             // A stray measurement — the page re-measured after a close won.
@@ -1190,8 +1200,19 @@ impl Tray {
             tracing::warn!(error = %err, "could not show the tray menu");
             return;
         }
-        if let Err(err) = window.set_focus() {
-            tracing::warn!(error = %err, "could not focus the tray menu");
+        if !bring_forward(&window) {
+            // Windows kept the foreground where it was. The menu is on screen
+            // and usable, but the blur that dismisses it cannot fire until the
+            // user clicks it once — so it is left open (`menu_open` set below,
+            // as always): a menu that takes one extra click to dismiss beats a
+            // menu that never opened. No timer either; an auto-close would be a
+            // second dismissal rule to keep in step with the page's own. The
+            // helper's taskbar flash is a no-op for this window, which has no
+            // taskbar button, so this line is the only signal there is.
+            tracing::warn!(
+                "Windows refused the foreground for the tray menu; it is open, but it will \
+                 not dismiss on blur until it is clicked"
+            );
         }
         self.menu_open = true;
     }
@@ -1244,11 +1265,12 @@ fn act(app: &AppHandle, state: &ShellState, facts: &TrayFacts, action: MenuActio
 /// Show the main window because the user asked for it.
 ///
 /// **The invariant-2 carve-out** (one of the two in this file; the other is
-/// the menu window's own focus in [`Tray::place_and_show`]). The user clicked
-/// an item that says "Open Sotone", or double left-clicked the icon, which
-/// means the same thing ([`icon_input`]);
+/// the menu window's own foreground in [`Tray::place_and_show`]). The user
+/// clicked an item that says "Open Sotone", or double left-clicked the icon,
+/// which means the same thing ([`icon_input`]), or relaunched the exe, which
+/// the single-instance callback answers with that same [`MenuAction::Open`];
 /// `show()` alone leaves the window behind whatever they were looking at on
-/// Windows, which would make both look broken. Nothing on the capture path
+/// Windows, which would make all three look broken. Nothing on the capture path
 /// and no overlay path can reach this function — it has exactly one caller,
 /// [`act`], on the tray thread, and that caller runs only for a
 /// [`MenuAction`] the user asked for by hand.
@@ -1260,12 +1282,105 @@ fn open_window(app: &AppHandle, view: Option<&'static str>) {
         tracing::warn!(error = %err, "could not show the window");
         return;
     }
-    if let Err(err) = window.set_focus() {
-        tracing::warn!(error = %err, "could not bring the window forward");
+    if !bring_forward(&window) {
+        // Not a failure to report as one: the window IS on screen, Windows
+        // simply would not move the foreground to it (see [`bring_forward`]).
+        tracing::info!(
+            "the window is shown and its taskbar button is flashing: Windows refused the \
+             foreground"
+        );
     }
     if let Some(view) = view {
         shell::request_view(app, view);
     }
+}
+
+/// Ask Windows to put `window` in front. `true` if it agreed.
+///
+/// **The app's one `SetForegroundWindow` call site** — both invariant-2
+/// carve-outs come through here — and deliberately the whole of it. If Windows
+/// refuses, the window stays where `show()` put it, its taskbar button flashes,
+/// and that is the end of the matter.
+///
+/// **Why there is no fallback, and never will be (invariant 1).** The obvious
+/// call, tauri's `Window::set_focus`, is tao's, and tao's answer to a refusal
+/// (`force_window_active`, `platform_impl/windows/window.rs`) is to `SendInput`
+/// a left-Alt press and release and try again. Sotone's headline promise is
+/// that it cannot generate a keystroke — the reason it is safe to run next to
+/// anti-cheat — and an Alt tap delivered into a fullscreen game is that promise
+/// broken by a dependency. Every documented workaround for the refusal is the
+/// same trick in a different coat (`AttachThreadInput`, an Alt tap of our own,
+/// a retry timer that waits for input we did not receive), so there is nothing
+/// to fall back *to*. Windows refuses only when no process of ours holds the
+/// foreground grant, which is exactly when the user is looking at something
+/// else; a flashing taskbar button is the honest answer to that. Where a
+/// cooperating process of ours does hold the grant it hands it over first
+/// (`AllowSetForegroundWindow`, at the top of `main.rs`), which is what makes
+/// the exe-relaunch entrance front the window instead of flashing.
+///
+/// Invariant 2 is unmoved: two callers, each one a user's explicit ask, both on
+/// the tray thread.
+#[cfg(windows)]
+fn bring_forward(window: &WebviewWindow) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FlashWindowEx, IsIconic, SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_TIMERNOFG,
+        FLASHW_TRAY, SW_RESTORE,
+    };
+
+    let hwnd = match window.hwnd() {
+        // Tauri's `HWND` is the `windows` crate's newtype and `windows-sys`
+        // takes the bare pointer it wraps — the same type underneath, unwrapped
+        // exactly as the overlay's extended-style fixup does in `shell.rs`.
+        Ok(handle) => handle.0,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not read the window handle");
+            return false;
+        }
+    };
+
+    // SAFETY: `hwnd` was read off the live `WebviewWindow` a moment ago, so it
+    // names a window this process owns, and the `AppHandle` the caller resolved
+    // it through outlives these calls, so it cannot be destroyed underneath
+    // them. Each call takes that handle and constants; `FLASHWINFO` is fully
+    // initialised with `cbSize` set to its own size, which is the only thing
+    // `FlashWindowEx` asks of the caller.
+    unsafe {
+        // A minimized window that is `show()`n is still minimized, and Windows
+        // will not bring an iconic window to the foreground — so the restore
+        // has to come first or a relaunch answers the user with nothing.
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd) != 0 {
+            return true;
+        }
+        // Refused. `FLASHW_TRAY | FLASHW_TIMERNOFG` is the documented way to
+        // ask for attention without taking it: the taskbar button flashes until
+        // the window reaches the foreground and then stops on its own — no
+        // `FLASHW_STOP` for anyone to remember, and nothing that flashes for
+        // ever.
+        let flash = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        FlashWindowEx(&flash);
+    }
+    false
+}
+
+/// Everywhere else, the caller's `show()` is the whole of what Sotone does.
+///
+/// There is no portable "front this window" that is not `set_focus`, and
+/// `set_focus` is banned for the reason above, so this answers `true` rather
+/// than logging a refusal nobody observed. Window behaviour off Windows is
+/// untested throughout this app; parity is a deferred item, not a silent gap —
+/// the same position the overlay's extended styles take in `shell.rs`.
+#[cfg(not(windows))]
+fn bring_forward(_window: &WebviewWindow) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------

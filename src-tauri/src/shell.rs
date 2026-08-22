@@ -237,8 +237,8 @@
 //!   data that exists is what the hook *observed*; commands from JS can flip a
 //!   bool and read a snapshot, and that is the entire surface.
 //! * **2 — never steal focus.** No code path in this file calls a focus,
-//!   activate or raise API on either window: there is no `set_focus`, no
-//!   `set_always_on_top`, no `unminimize`, and not even a read of
+//!   activate or raise API on either window: there is no `SetForegroundWindow`,
+//!   no `set_always_on_top`, no `unminimize`, and not even a read of
 //!   `is_focused`. Capture works regardless of which window is focused,
 //!   including Sotone's own; focus-based auto-disarm was tried once and
 //!   rejected.
@@ -277,17 +277,20 @@
 //!   launch when the wizard is about to run, once more if it finishes without a
 //!   restart. None of the three can activate anything: two are `SetWindowPos`
 //!   writes with no activation bit and the third is a style change, and there is
-//!   still no `set_focus`, `show` or raise on this window anywhere in this file.
+//!   still no `SetForegroundWindow`, `show` or raise on this window anywhere in
+//!   this file.
 //!   The main window taking focus when the OS launches it is standing behaviour
 //!   and is not touched; the overlay is not reached at all.
 //! * **2, again, for the tray.** Two carve-outs, both in
 //!   `crate::tray` and both user-initiated: the glass menu window taking
-//!   focus for as long as it is open (blur is the dismissal, the
-//!   native menu's own semantics), and the `show()` + `set_focus()` behind
+//!   the foreground for as long as it is open (blur is the dismissal, the
+//!   native menu's own semantics), and the `show()` + front behind
 //!   "Open Sotone", a recent note, Settings, the icon's double-click
-//!   and an exe relaunch. `set_focus` appears in exactly two functions
-//!   in this crate, `tray::open_window` and `Tray::place_and_show`, and
-//!   nothing in *this* file calls either.
+//!   and an exe relaunch. Both reach it through this crate's one
+//!   `SetForegroundWindow` call site, `tray::bring_forward`, whose two
+//!   callers are `tray::open_window` and `Tray::place_and_show` and whose
+//!   doc comment says why a refusal is taken as final (invariant 1, one
+//!   crate down). Nothing in *this* file calls any of the three.
 //!   [`on_close`] does the opposite — it hides the window, or quits
 //!   without showing anything at all — and that `hide()` is the only
 //!   visibility call the *main* window has ever had here.
@@ -4147,6 +4150,17 @@ pub async fn models_rescan(app: AppHandle, state: State<'_, ShellState>) -> Resu
 /// promise never settles. That is correct here: the answer to "restart" arrives
 /// as a new process, not as a resolved promise.
 ///
+/// **Being `async` is also what keeps it off the main thread, and that
+/// matters.** Tauri runs an async command on its thread pool, which is the
+/// branch of `AppHandle::restart` that requests an exit and lets the event loop
+/// deliver `RunEvent::Exit` — and `RunEvent::Exit` is where the single-instance
+/// plugin releases its named mutex, *before* `App::run` spawns the replacement
+/// process. The main-thread branch skips both events and relaunches on the
+/// spot, so the child would race a mutex this process still holds: at best it
+/// starts with no single-instance protection, at worst it signals a Sotone that
+/// is on its way out and exits, leaving the user with nothing. Any future
+/// caller of `restart` stays off the main thread for that reason.
+///
 /// # Errors
 /// Never in practice; the one refusal is a notice.
 #[tauri::command]
@@ -4581,8 +4595,8 @@ fn overlay_position(
 /// `focus: false` means tao dispatches every `show()` as `SW_SHOWNOACTIVATE`,
 /// `focusable: false` puts `WS_EX_NOACTIVATE` on it so even a click cannot hand
 /// it activation, and `set_size`/`set_position` are `SetWindowPos` calls that
-/// touch neither z-order nor focus. There is no `set_focus`, no raise and no
-/// `set_always_on_top` anywhere in this file.
+/// touch neither z-order nor focus. There is no `SetForegroundWindow`, no raise
+/// and no `set_always_on_top` anywhere in this file.
 ///
 /// **Ordering.** Size before position before show: the position depends on the
 /// size (a right-anchored window's x is a function of its width), and both must

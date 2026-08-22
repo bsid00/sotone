@@ -66,7 +66,19 @@ serde = { workspace = true }
 # before this dependency existed. Cargo unifies features, so declaring
 # windows-sys here neither adds nor removes it. What holds invariant 1 is that
 # no call site exists anywhere in this repository — `grep -r SendInput` over
-# src-tauri/ and crates/ finds only comments — exactly as it did before.
+# src-tauri/ and crates/ finds only comments.
+#
+# That argument used to stop at our own source, and stopping there was a gap:
+# tauri's `Window::set_focus` is tao's, and tao answers a refused
+# `SetForegroundWindow` by injecting a left-Alt press and release with
+# `SendInput` and trying again (`force_window_active`). We called it twice.
+# Since task 055 we do not — both focus carve-outs call `SetForegroundWindow`
+# themselves, through `tray::bring_forward`, and take "no" for an answer — so
+# the only in-dependency route to `SendInput` anyone has found is no longer
+# reachable from this app, and `set_focus` is banned in this repo. The grep
+# rule, in three parts: `set_focus`, zero hits in `src-tauri/` and `crates/`
+# `.rs` files outside comments; `SetForegroundWindow`, exactly one call site,
+# the helper; `SendInput`, zero.
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",

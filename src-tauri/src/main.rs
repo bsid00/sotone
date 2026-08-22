@@ -30,6 +30,37 @@ fn main() {
     // Before anything else, so even startup failures are structured.
     init_tracing();
 
+    // Hand the foreground grant on, from whichever copy of Sotone holds it.
+    //
+    // This runs in *both* copies, which is the whole point of its position: a
+    // second launch executes `main()` as far as the single-instance plugin's
+    // setup below, and only there does it signal the running instance and
+    // exit. That second process is the one the shell launched, so it is the
+    // one holding the foreground grant, and it would otherwise exit without
+    // ever spending it. The running instance holds none — it is a background
+    // process that received no input — so by the documented
+    // `SetForegroundWindow` rules its call would fail, and the relaunch would
+    // be answered by a flashing taskbar button instead of the window the user
+    // asked for. `ASFW_ANY` passes the grant along; `tray::bring_forward` in
+    // the running instance is what spends it.
+    //
+    // It costs the *first* instance nothing: it is on its way to creating its
+    // own foreground window anyway. Invariant 2 is untouched — this grants a
+    // right, it does not move focus, and nothing here shows or raises a
+    // window. Invariant 1 is why the grant exists at all instead of tauri's
+    // `set_focus`, which fakes an Alt press when Windows says no
+    // (`tray::bring_forward` has that story).
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+
+        // SAFETY: the call takes a process id by value and touches no memory of
+        // ours; `ASFW_ANY` is its documented wildcard. The return value is
+        // ignored deliberately — there is no second thing to try, and the
+        // consequence of a refusal is a taskbar flash, not a failure.
+        unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
+
     tracing::info!(
         backend = sotone_core::backend_name(),
         version = env!("CARGO_PKG_VERSION"),
@@ -67,7 +98,8 @@ fn main() {
             // thread, in `act()` → `open_window` — the existing focus
             // carve-out that "Open Sotone" and the icon's double-click already
             // use, because relaunching the exe is the user asking for the
-            // window. No new focus call is added anywhere by this task.
+            // window. This adds no focus call of its own: the foreground grant
+            // handed over at the top of `main()` is a permission, not a move.
             //
             // `_args` and `_cwd` are dropped deliberately, not forgotten:
             // Sotone has no command-line surface, so there is nothing a
