@@ -1346,6 +1346,34 @@ pub struct SearchOutcome {
     pub matches: usize,
 }
 
+/// What one create did.
+///
+/// A command answer like [`SearchOutcome`], and one word on the wire —
+/// `"created"` / `"refused"` — for the reason [`SaveEvent`] carries one: the
+/// window switches on a string, and a shape it cannot mis-destructure is worth
+/// more than a tidy union.
+///
+/// It exists because a refusal resolves exactly as an acceptance does, so a
+/// creation surface had no way to tell the two apart short of reading notices.
+/// All three read the resolved promise as a yes: the Projects pane cleared its
+/// form and left the pane, the pick-or-create popup closed and came back blank,
+/// and the wizard stepped on to "ready" with no project.
+///
+/// Every refusal still emits its notice. The outcome is **in addition to** the
+/// sentence, never instead of it — and it is deliberately not an `Err`, which
+/// this window reports as a failure. A name already taken, a blank field, a
+/// folder that could not be made and a live recording are ordinary answers with
+/// a sentence of their own; only a configuration that cannot be written is a
+/// failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateOutcome {
+    /// The project is in the configuration and it is the active one.
+    Created,
+    /// Nothing was written and nothing changed. A notice says why.
+    Refused,
+}
+
 /// Everything the frontend would otherwise have had to catch live.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShellStatus {
@@ -2699,25 +2727,37 @@ fn prepare_project_folder(name_taken: bool, name: &str, notes_dir: &Path) -> Res
 /// with the create-a-subfolder switch and sends the answer, exactly as the
 /// wizard always has, so this command's contract is unchanged.
 ///
+/// Answers with a [`CreateOutcome`] so the surface that sent this can tell
+/// acceptance from refusal without reading notices — every refusal below is a
+/// resolved promise, and three surfaces used to take that for a yes. The notice
+/// each one emits is unchanged: the outcome is in addition to the sentence.
+///
+/// **Invariant 4:** the order that keeps a refusal off the disk is untouched.
+/// Every refusal above [`prepare_project_folder`] returns before anything
+/// reaches the filesystem, and that step creates and never removes.
+///
 /// # Errors
-/// If the configuration file cannot be written. A rejected name, a blank
-/// folder, or a folder that could not be created is a notice and not an error.
+/// If the configuration file cannot be written, or if the app is still starting
+/// up and has no configuration to read. A rejected name, a blank folder, a
+/// folder that could not be created and a live recording are notices and
+/// [`CreateOutcome::Refused`], not errors: `Err` is what the window reports as
+/// a failure, and each of these is an answer with a sentence of its own.
 #[tauri::command]
 pub async fn project_create(
     name: String,
     notes_dir: String,
     app: AppHandle,
     state: State<'_, ShellState>,
-) -> Result<(), String> {
+) -> Result<CreateOutcome, String> {
     if refuse_while_recording(&app, &state, "create a project") {
-        return Ok(());
+        return Ok(CreateOutcome::Refused);
     }
 
     let name = name.trim().to_owned();
     let notes_dir = notes_dir.trim().to_owned();
     if name.is_empty() {
         state.notice(&app, NoticeLevel::Warn, "a project needs a name");
-        return Ok(());
+        return Ok(CreateOutcome::Refused);
     }
     if notes_dir.is_empty() {
         state.notice(
@@ -2725,7 +2765,7 @@ pub async fn project_create(
             NoticeLevel::Warn,
             "pick the folder this project's notes go in",
         );
-        return Ok(());
+        return Ok(CreateOutcome::Refused);
     }
 
     // The name check the config write makes below, run early against the
@@ -2741,7 +2781,7 @@ pub async fn project_create(
     };
     if let Err(refusal) = prepare_project_folder(name_taken, &name, Path::new(&notes_dir)) {
         state.notice(&app, NoticeLevel::Warn, refusal);
-        return Ok(());
+        return Ok(CreateOutcome::Refused);
     }
 
     let created = state.edit_config(|config| {
@@ -2758,7 +2798,7 @@ pub async fn project_create(
 
     if !created {
         state.notice(&app, NoticeLevel::Warn, name_taken_refusal(&name));
-        return Ok(());
+        return Ok(CreateOutcome::Refused);
     }
 
     // The worker creates a draft the moment a line needs one, so it has to hear
@@ -2775,7 +2815,7 @@ pub async fn project_create(
         NoticeLevel::Debug,
         format!("\"{name}\" is now active"),
     );
-    Ok(())
+    Ok(CreateOutcome::Created)
 }
 
 /// Make a project active, or clear the active project with `null`.
@@ -10064,10 +10104,40 @@ mod tests {
         );
     }
 
+    /// The two words the window switches on. A refusal resolves like an
+    /// acceptance does, so this string is the only thing standing between a
+    /// refused create and a form that clears itself — a variant renamed
+    /// without a thought for the frontend fails here.
+    ///
+    /// Serialized through [`tauri::ipc::IpcResponse`], which is the JSON path
+    /// this crate already has: it is the blanket impl `#[tauri::command]`
+    /// itself hands the return value to, so this asserts the derive by the
+    /// route the answer really travels. (`serde_json` is deliberately not a
+    /// dependency here — the phase test records the same call.)
+    #[test]
+    fn the_create_outcome_is_the_word_the_window_switches_on() {
+        use tauri::ipc::{InvokeResponseBody, IpcResponse};
+
+        fn wire(outcome: CreateOutcome) -> String {
+            match outcome.body().expect("a unit variant always serializes") {
+                InvokeResponseBody::Json(json) => json,
+                InvokeResponseBody::Raw(_) => {
+                    panic!("a command answer is JSON, never a byte payload")
+                }
+            }
+        }
+
+        assert_eq!(wire(CreateOutcome::Created), "\"created\"");
+        assert_eq!(wire(CreateOutcome::Refused), "\"refused\"");
+    }
+
     /// A rename that meets no folder renames the configuration anyway and says
     /// which half did not happen. This once reached `fs::rename`, which
     /// failed and aborted a rename that had nothing wrong with it — older
     /// projects have no folder until their first save.
+    ///
+    /// Both halves are pinned here, because "renames the configuration anyway"
+    /// is the half a reader has to take on trust otherwise.
     #[test]
     fn a_rename_whose_folder_is_missing_keeps_the_config_rename() {
         let tree = TempTree::new("rename-missing");
@@ -10079,8 +10149,39 @@ mod tests {
             }),
             FolderStep::Keep(FolderKept::NoFolder)
         );
-        // No `moved` means `rename_project(from, to, None)`: the name changes,
-        // `notes_dir` does not, and this is the sentence the footer gets.
+
+        // A `Keep` step is what makes the command pass `None`, so this is the
+        // config half exactly as `project_rename` performs it.
+        let mut config = Config::default();
+        config
+            .projects
+            .push(Project::new("Ludo", tree.path().join("Ludo")));
+        config
+            .projects
+            .push(Project::new("Studio", tree.path().join("Studio")));
+        config
+            .rename_project("Ludo", "Ludo 2", None)
+            .expect("the project is there and the new name is free");
+
+        let renamed = config
+            .project("Ludo 2")
+            .expect("the rename went through in the configuration");
+        assert_eq!(
+            renamed.notes_dir,
+            tree.path().join("Ludo"),
+            "no folder moved, so the binding must still point where it did"
+        );
+        assert!(
+            config.project("Ludo").is_none(),
+            "the old name is gone, not kept alongside the new one"
+        );
+        let other = config
+            .project("Studio")
+            .expect("the other project is untouched");
+        assert_eq!(other.notes_dir, tree.path().join("Studio"));
+        assert_eq!(config.projects.len(), 2, "a rename never adds a project");
+
+        // And the sentence the footer gets for the half that did not happen.
         assert_eq!(
             FolderKept::NoFolder.note(),
             "folder kept — there is no folder of its own to rename"

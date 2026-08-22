@@ -4750,10 +4750,15 @@ async function createWizardProject() {
     // `project_create` makes it active itself, and answers with
     // `sotone://projects` — which is what makes the button read Continue if the
     // user comes back to this step.
-    await invoke("project_create", {
+    const outcome = await invoke("project_create", {
       name,
       notesDir: joinPath(wizardRoot, wizardSlug),
     });
+    // The step only advances on an acceptance. A refusal resolves too, and
+    // taking that for a yes lands the user on "ready" with no project — which
+    // is what a folder that could not be created (a read-only or unplugged
+    // drive) does. The notice says why; the step stays where they can fix it.
+    if (outcome !== "created") return;
   } catch (err) {
     reportFailure(err);
     return;
@@ -7662,9 +7667,13 @@ async function main() {
       // with the project's own folder inside it, or the picked folder itself
       // with the switch off.
       const notesDir = await createNotesDir("new-project");
-      await invoke("project_create", { name, notesDir });
-      // Cleared only once the backend accepted it; a refused name stays in the
-      // field where the user can fix it.
+      // Acceptance is the answer, not the resolved promise: every refusal
+      // — a taken name, a folder that could not be created — resolves as well,
+      // carrying its reason in a notice. Anything but `"created"` leaves the
+      // name, the folder and the switch exactly as the user typed them, on the
+      // pane they are already looking at.
+      const outcome = await invoke("project_create", { name, notesDir });
+      if (outcome !== "created") return;
       clearCreateForm("new-project");
       // Back to the notes, where the new group appearing in the tree is the
       // confirmation. Deliberately not straight into the new project's panel:
@@ -7717,8 +7726,9 @@ async function main() {
       });
       return;
     }
-    // Composed before the popup closes: the fields are read while they are
-    // still on screen, and `project_create`'s contract is unchanged.
+    // Composed while the fields are still on screen — the popup now closes
+    // after the answer, not before it — and `project_create`'s contract is
+    // unchanged.
     let notesDir;
     try {
       notesDir = await createNotesDir("no-project");
@@ -7726,12 +7736,20 @@ async function main() {
       reportFailure(err);
       return;
     }
-    closeNoProject();
     try {
-      await invoke("project_create", { name, notesDir });
+      const outcome = await invoke("project_create", { name, notesDir });
+      // The popup closes on an acceptance and on nothing else. Closing first
+      // was the bug: a refusal still resolves, so `saveDraft` ran, answered
+      // `no_project`, and reopened this popup blank — the user's name and
+      // folder gone with the reason they were refused. Returning leaves it
+      // open, untouched. Deliberately not `openCreateForm`/`openNoProject`:
+      // both put the create-a-subfolder switch back to on.
+      if (outcome !== "created") return;
+      closeNoProject();
       clearCreateForm("no-project");
       saveDraft(false);
     } catch (err) {
+      // A failure leaves it open too — there is still no project to save into.
       reportFailure(err);
     }
   });
