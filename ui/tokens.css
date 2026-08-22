@@ -70,9 +70,9 @@
      at 12.5px (want ~4.55) and 5.5px at 13px (want ~4.73). Boxed controls
      subtract the token above and add it below, so border-box heights never
      move. One number per font size, never a per-element hand-tune. */
-  --ink-up-125: 0.4px; /* 12.5px sans controls (and the 12px sort value) */
   /* One number, two directions: sans ink sits low and is lifted by it, mono
      ink sits high and is dropped by it (`.wiz-path__value`, task 052). */
+  --ink-up-125: 0.4px; /* 12.5px sans controls (and the 12px sort value) */
   --ink-up-13: 0.75px; /* 13px sans controls */
 }
 

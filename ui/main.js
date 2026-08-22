@@ -4557,8 +4557,18 @@ function wizardHasSession() {
 
 function renderWizardFooter() {
   el("wiz-count").textContent = `${wizardStep} of ${WIZARD_STEPS}`;
+  const back = el("wiz-back");
   // Back is a quiet text button from step two on, and never a chevron.
-  el("wiz-back").dataset.open = wizardStep > 1 ? "yes" : "no";
+  back.dataset.open = wizardStep > 1 ? "yes" : "no";
+  // The one thing that stops it is an open capture — a step's own requirement
+  // is a reason not to go on, never a reason not to go back — and it stops it
+  // in the grammar Next uses below: disabled, never hidden, carrying its
+  // reason. Both buttons sit in `#view-empty`, which the Settings inert sweep
+  // does not reach, so this render is the only thing holding them (task 054).
+  const pinned = capturing() ? REBIND_BUSY_TITLE : "";
+  back.dataset.live = pinned ? "no" : "yes";
+  back.disabled = Boolean(pinned);
+  back.title = pinned;
 
   const next = el("wiz-next");
   next.textContent = wizardPrimaryLabel();
@@ -4581,9 +4591,17 @@ function wizardPrimaryLabel() {
 }
 
 // What is still missing on this step, as a sentence, or null when nothing is.
-// Only two steps have a requirement at all: the model, and the name of the
-// first project.
+// Two steps have a requirement of their own — the model, and the name of the
+// first project — and an open key capture holds every step there is.
 function wizardBlockedBecause() {
+  // Checked first, and without asking which step this is: a capture is the
+  // backend's state, not the step's. Walk on while the question is open and the
+  // row asking it leaves the screen with the helper still waiting for its one
+  // press — the first key of the name typed on step 6 answers it instead, and
+  // push-to-talk silently becomes that letter (task 054). Cancel, or press the
+  // key you meant, is the way on. The busy cap's own sentence, from the one
+  // constant, so the two readings of "wait" cannot drift apart.
+  if (capturing()) return REBIND_BUSY_TITLE;
   if (wizardStep === 5) {
     if (wizardHasSession()) return null;
     const state = emptyState();

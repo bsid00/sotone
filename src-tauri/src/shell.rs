@@ -5960,9 +5960,17 @@ fn run(
         match input {
             // Every branch but the settings one needs the session, and the
             // empty phase has none: no hook to send a key, no worker to hand a
-            // draft to. Those arrive from surfaces that phase never offers, so
-            // what happens without a session is the trace above and nothing
-            // more.
+            // draft to. Nearly all of them arrive from surfaces that phase
+            // never offers, so what happens without a session is the trace
+            // above and nothing more.
+            //
+            // The one that does arrive is the wizard's step 6: `project_create`
+            // sends `Draft(DraftInput::SetProject)`, and the `Draft` arm below
+            // drops it. Harmless, because in that phase the config write *is*
+            // the whole of a create — there is no worker yet holding a stale
+            // active project to correct, and the session the wizard's finish
+            // restarts into reads `active_project` back out of the file
+            // (`init`, where the worker's copy is seeded).
             ShellInput::Key(key) => {
                 let Some(session) = session.as_ref() else {
                     continue;
@@ -8894,8 +8902,13 @@ mod tests {
             Some("F14".parse::<Binding>().expect("the default parses"))
         );
 
-        // And a refusal writes nothing: two enabled modes may not share a
+        // And a refusal changes nothing: two enabled modes may not share a
         // binding, so the file never grows one the next load would reject.
+        // "Changes", not "writes": production asks through
+        // `edit_config(|c| Ok(rebind(..)))`, so a refusal comes back as
+        // `Ok(Some(problem))` and the file is rewritten anyway — with the
+        // content it already had. The content is the promise, and it is what
+        // this asserts.
         let mut clash = next;
         assert!(rebind(&mut clash, HotkeyMode::Ptt, "F14").is_some());
         assert_eq!(clash.hotkey, "MouseX1", "a refused rebind changes nothing");

@@ -3448,9 +3448,17 @@ select[data-enhanced="yes"] {
   color: var(--muted);
 }
 
-.wiz-btn--quiet:hover {
+.wiz-btn--quiet:not(:disabled):hover {
   background: var(--sel);
   color: var(--text);
+}
+
+/* Held by an open key capture (task 054): the same inert reading Continue
+   has above, because a Back that still lights up under the pointer says it
+   will go when it will not. Faint ink, no hover, the reason in its title. */
+.wiz-btn--quiet[data-live="no"] {
+  color: var(--faint);
+  cursor: default;
 }
 
 /* Back is absent on step one — there is nothing behind it. */
