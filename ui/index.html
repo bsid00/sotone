@@ -1,0 +1,1784 @@
+<!doctype html>
+<!-- `data-platform` decides the window chrome, the corner radii and the system
+     font stack (tokens.css). It is set for real from the settings event, which
+     carries the *compile-time* target — nothing here sniffs a user agent — and
+     `windows` is the markup's placeholder so the first paint, before any event
+     has arrived, is not macOS geometry on a Windows machine.
+
+     `data-theme` is deliberately absent: tokens.css treats absence as dark, and
+     main.js only ever *adds* `data-theme="light"`. -->
+<html lang="en" data-platform="windows">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sotone</title>
+    <!-- Every resource is same-origin and local. No CDN, no webfont, no
+         analytics: nothing in this window may reach the network (invariant 3),
+         and the CSP in tauri.conf.json enforces it. Scripts are external for
+         the same reason inline handlers are absent — 'unsafe-inline' is not on
+         the policy and is not going to be. -->
+    <!-- The `?v=` on both is load-bearing, not decoration: the in-app browser
+         and WebView2 both happily serve a disk-cached stylesheet across
+         sessions, which is how a shell redesign gets tested against last
+         week's CSS. Bump it whenever the shape of
+         either file changes. -->
+    <!-- Tokens first: style.css is nothing but `var(--…)` and the two palettes
+         both live in here. -->
+    <link rel="stylesheet" href="tokens.css?v=044" />
+    <link rel="stylesheet" href="style.css?v=048" />
+    <script src="main.js?v=049" defer></script>
+  </head>
+  <body>
+    <main class="app">
+      <!-- The window's own caption. `decorations: false`, so this
+           strip is the title bar on all three platforms; which chrome it draws
+           is `data-platform` on <html>, and the CSS does the rest.
+
+           `data-tauri-drag-region` goes on the bar and never on a child: in the
+           bare form a drag only starts when the event *target* carries the
+           attribute, so the three buttons below can never begin one. The same
+           script turns a double-click on the bar into toggle-maximize.
+
+           Nothing in here can activate, show or focus a window — the three
+           buttons minimize, toggle-maximize and close, and the capability file
+           grants nothing else (invariant 2). Close goes through `close()`, not
+           `destroy()`, so the Rust `CloseRequested` teardown still runs.
+
+           The bar also carries what a one-line top bar would otherwise:
+           the recording indicator and the hotkey hint, at the right (left of the
+           caption buttons on Windows and GNOME; on macOS the caption is
+           `order: -1`, so the same DOM puts this group at the right end there
+           too — exactly as each canvas draws it). Enabled/Disabled is not part
+           of that group; it follows the wordmark.
+
+           `data-phase` decides whether that group is on screen: it describes a
+           session, so it says nothing while Sotone is starting, has no model, or
+           has failed. A data attribute rather than the `hidden` attribute,
+           because the rule that shows it sets `display`. -->
+      <div id="titlebar" class="titlebar" data-maximized="no" data-phase="loading"
+           data-tauri-drag-region>
+        <span class="titlebar__brand">
+          <!-- The logo: four CSS rectangles, 2px wide with a 2px gap, heights
+               5/10/7/4, the design's own proportions. No image, no icon font —
+               nothing in this window ever asks the network for a file
+               (invariant 3). -->
+          <span class="glyph" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span class="titlebar__wordmark">SOTONE</span>
+        </span>
+        <!-- The safety against accidental capture, not a record button: it arms
+             and disarms, and the hotkey does the rest. Disarming still stops a
+             live recording; that is deliberate.
+
+             It sits beside the wordmark rather than with the readouts at the
+             right, by design: it is the control the hand reaches for,
+             and the group at the right is a readout group. Like that group it
+             describes a session, so CSS keeps it off screen until
+             `data-phase="ready"` — a `display` rule keyed off the attribute,
+             never the `hidden` attribute. It carries no
+             `data-tauri-drag-region` of its own, so it can never begin a drag. -->
+        <button id="arm" type="button" class="arm__toggle">Enabled</button>
+        <p id="status-detail" class="titlebar__detail">starting…</p>
+
+        <span class="titlebar__session">
+          <!-- One indicator, three states, and it is a *readout*: there is no
+               record button anywhere in Sotone, because capture is keyboard-only
+               (the design rule that shapes everything).
+
+               armed idle → the four bars at `--dim`, paused, `REC 00:00`;
+               recording → `--live`, animating, the elapsed time ticking;
+               disarmed → `--faint`, `REC OFF`. The state travels as a data
+               attribute and CSS owns the appearance — never the `hidden`
+               attribute, which an author `display` rule silently beats.
+               The initial state matches main.js's armed-by-default,
+               so the first paint is right before any event arrives. -->
+          <span id="recording" class="rec" data-state="armed">
+            <span class="rec__bars" aria-hidden="true">
+              <i></i><i></i><i></i><i></i>
+            </span>
+            <span id="recording-label" class="rec__label">REC 00:00</span>
+          </span>
+          <!-- Every surface that reports capture state also shows the key that
+               changes it. Filled from the settings event, so
+               it names the real binding rather than a default that may be
+               wrong. -->
+          <span id="hotkey-hint" class="titlebar__keys"></span>
+        </span>
+
+        <span class="titlebar__controls">
+          <button id="win-minimize" type="button" class="caption caption--min"
+                  title="Minimize" aria-label="Minimize">
+            <span class="caption__min" aria-hidden="true"></span>
+          </button>
+          <button id="win-maximize" type="button" class="caption caption--max"
+                  title="Maximize" aria-label="Maximize">
+            <span class="caption__max" aria-hidden="true"></span>
+            <span class="caption__restore" aria-hidden="true"></span>
+          </button>
+          <!-- Not red, on purpose: red in this app means a live recording and
+               nothing else (the design's colour rules). -->
+          <button id="win-close" type="button" class="caption caption--close"
+                  title="Close" aria-label="Close">
+            <span class="caption__close-a" aria-hidden="true"></span>
+            <span class="caption__close-b" aria-hidden="true"></span>
+          </button>
+        </span>
+      </div>
+
+      <!-- Startup: shown until the control thread says ready or fatal. -->
+      <section id="view-loading" class="view">
+        <div class="panel">
+          <p class="panel__lead"><span class="spinner" aria-hidden="true"></span> Starting up</p>
+          <p id="loading-step" class="muted">reading the configuration</p>
+        </div>
+      </section>
+
+      <!-- Startup failed. The window stays up so the reason is readable. -->
+      <section id="view-fatal" class="view" hidden>
+        <div class="panel panel--fatal">
+          <p class="panel__lead">Sotone cannot start</p>
+          <p id="fatal-message" class="fatal__message"></p>
+          <p class="muted">
+            Fix the cause and restart Sotone. The configuration file is the
+            editor until Settings exists.
+          </p>
+        </div>
+      </section>
+
+      <!-- First run. No weights ship with Sotone, so a machine with
+           no usable model is an expected state and not a failure: the empty
+           state is the onboarding. Everything here is in-page and
+           local — the address below is selectable text with a Copy button and
+           deliberately not a link, because this app opens no URL and downloads
+           nothing (invariant 3). The browser doing the downloading is the
+           user's own, which is exactly the carve-out in that invariant. -->
+      <section id="view-empty" class="view empty" hidden>
+        <div class="panel">
+          <p class="panel__lead">Sotone needs a speech model</p>
+          <!-- The specific reason this machine is here, from the status event:
+               no model at all, several with none chosen, or a configured one
+               that is missing or was rejected. -->
+          <p id="empty-reason" class="empty__reason"></p>
+          <p class="muted">
+            Sotone ships without one — no model weights are in the download or
+            the installer. It transcribes on this machine with whisper, so it
+            needs a whisper model in GGML format (a <code>.bin</code> file,
+            named like <code>ggml-small.en.bin</code>), and it never fetches
+            one for you: you download the file, put it in your models folder,
+            and Sotone uses it.
+          </p>
+        </div>
+
+        <!-- Which model, and where from. One copy of it, in the template at
+             the end of this file, cloned into here and into the wizard's model
+             step: the numbers are verified against the
+             live file tree, and two copies of them would eventually disagree
+             about how big a download is. -->
+        <div id="empty-guide" class="model-guide"></div>
+
+        <!-- What is actually in the folder right now, rejects included with
+             their reasons — a bad download explains itself here rather than
+             failing silently, and it can never be chosen. Filled from
+             `sotone://settings`: a model dropped into the folder appears as
+             soon as Rescan is pressed. This phase is the one place a restart
+             is still the answer: with no model there is no session
+             at all, so there is nothing running for a live change to reach. -->
+        <section class="settings">
+          <div class="settings__head">
+            <h2 class="settings__title">Your models folder</h2>
+            <span id="empty-dir" class="muted"></span>
+          </div>
+          <ul id="empty-models" class="settings__list"></ul>
+          <div class="empty__actions">
+            <!-- Put the file in the folder yourself, then Rescan.
+                 The reveal opens a local folder through the opener plugin and
+                 fetches nothing (invariant 3); the rescan is a directory read
+                 that re-emits the settings event, which is what refills the
+                 list above. -->
+            <button id="empty-reveal" type="button" class="linkish">
+              Open models folder
+            </button>
+            <button id="empty-rescan" type="button" class="linkish"
+                    title="Read the models folder again — Sotone does not watch it">
+              Rescan
+            </button>
+            <!-- Enabled only once a restart would actually reach a session:
+                 nothing is loaded in this phase, so this button is how a
+                 choice takes effect, and offering it before there is anything
+                 to load would just repeat this screen. -->
+            <button id="empty-restart" type="button" class="linkish" disabled>
+              Restart Sotone
+            </button>
+          </div>
+          <!-- The footer message slot's other rendering. The slot
+               proper lives in the session pane's footer, which does not exist
+               in this phase — and a rejected model file or a refused clipboard
+               write still has to land somewhere the user can read it. One
+               message, written to both, so there is one latest-wins slot and
+               two places it can be seen. `data-open`, never `hidden`: the rule
+               that shows it sets `display`. -->
+          <p id="empty-message" class="empty__message" data-open="no"></p>
+        </section>
+      </section>
+
+      <!-- The first-run wizard. The fifth
+           top-level view, and the *other* reading of a machine with no model:
+           the panel above is the repair surface for an install that lost its
+           weights, this is the seven steps a new install walks. Which one is on
+           screen is `onboarded` on the status event, and a fatal beats both.
+
+           Seven, not the six drawn: the mock's own implementation note says to
+           replace its steps with what the app actually asks for, and Sotone
+           ships no weights (invariant 6) — the mock's summary card draws a
+           model row, and a model step is what makes that row true. The two
+           steps that are dropped are the mock's permission asks: a Win32
+           desktop app cannot ask for the microphone (there is no programmatic
+           ask — the OS privacy toggle is out of our reach) and the low-level
+           hook needs no permission at all.
+
+           Steps are swapped with `data-current`, never the `hidden` attribute:
+           the rule that shows one sets `display`, and an author display rule
+           beats the UA sheet's `[hidden]`. -->
+      <section id="view-onboarding" class="view onboarding" hidden
+               data-travel="forward">
+        <div id="wiz-steps" class="onboarding__body">
+
+          <!-- 1 · Welcome. The only centred layout in the wizard. -->
+          <section class="wiz wiz--centred" data-step="1" data-current="yes">
+            <!-- The logo at rest, at the mock's own size: 6px bars, radius 3,
+                 heights 18/40/28/14, 6px apart in a 44px row. The title bar's
+                 glyph is the same four bars at 2px; nothing here is an image
+                 and nothing is fetched (invariant 3). -->
+            <span class="wiz-logo" aria-hidden="true">
+              <i></i><i></i><i></i><i></i>
+            </span>
+            <div class="wiz__lead">
+              <h2 class="wiz__brand">Sotone</h2>
+              <p class="wiz__prose">
+                Talk while you work. Sotone transcribes each line you say and
+                appends it to a markdown note, without you leaving what you are
+                testing.
+              </p>
+            </div>
+            <p class="wiz__facts">
+              Runs on this machine · no account · nothing uploaded
+            </p>
+          </section>
+
+          <!-- 2 · Microphone. No permission row: see the note above. The
+               device picker is the Settings one's twin — same command, same
+               list, same "(system default)" spelling. -->
+          <section class="wiz" data-step="2">
+            <h2 class="wiz__title">Choose your microphone</h2>
+            <p class="wiz__prose">
+              The microphone opens when Sotone starts and stays shut until you
+              hold or press the recording key. Nothing is captured before that,
+              and audio never leaves this machine.
+            </p>
+            <div class="set-card">
+              <div class="set-row">
+                <div class="set-row__main">
+                  <span class="set-row__label">Microphone</span>
+                </div>
+                <span class="set-row__control">
+                  <span class="pick">
+                    <select id="wiz-mic" class="pick__select"
+                            aria-label="Microphone"></select>
+                    <span class="pick__caret" aria-hidden="true"></span>
+                  </span>
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 3 · Notes folder. Wizard state, not configuration: nothing is
+               written until the project step creates a project under it. -->
+          <section class="wiz" data-step="3">
+            <h2 class="wiz__title">Where notes are written</h2>
+            <p class="wiz__prose">
+              Sotone writes plain markdown files you can open in anything. Each
+              project becomes a folder inside this one.
+            </p>
+            <div class="wiz-path">
+              <span id="wiz-root" class="wiz-path__value"></span>
+              <!-- The native folder picker — the one surface in Sotone that
+                   takes focus, and it opens only from this click. -->
+              <button id="wiz-root-pick" type="button" class="wiz-btn wiz-btn--second">
+                Choose…
+              </button>
+            </div>
+            <p id="wiz-example" class="wiz__example"></p>
+          </section>
+
+          <!-- 4 · Keys. Rendered from the settings event, so the caps name the
+               real bindings rather than a default that may be wrong. -->
+          <section class="wiz" data-step="4">
+            <h2 class="wiz__title">Pick your keys</h2>
+            <p class="wiz__prose">
+              Recording is driven entirely by the keyboard. There is no record
+              button anywhere in Sotone.
+            </p>
+            <div class="set-card">
+              <ul id="wiz-keys" class="set-list"></ul>
+            </div>
+          </section>
+
+          <!-- 5 · The model. The step Sotone cannot skip: no weights ship with
+               it (invariant 6), so this is where the user learns what a model
+               is and puts one in the folder. The guide below is the same one
+               the repair panel shows — one template, cloned twice. -->
+          <!-- The one step that can outgrow the frame — a five-row table and
+               two paragraphs. It scrolls inside the body (`safe center`)
+               rather than being cut down: these are the numbers a first run is
+               choosing between. -->
+          <section class="wiz" data-step="5">
+            <h2 class="wiz__title">Add a speech model</h2>
+            <p class="wiz__prose">
+              Sotone transcribes on this machine with whisper, so it needs a
+              whisper model in GGML format — a <code>.bin</code> file, named
+              like <code>ggml-small.en.bin</code>. It never fetches one for
+              you: you download the file, put it in your models folder, and
+              Sotone uses it.
+            </p>
+            <!-- Why *this* machine has no model, from the status event. Absent
+                 on a machine that launched with one. -->
+            <p id="wiz-model-reason" class="wiz__reason" data-open="no"></p>
+            <!-- The ready collapse: one row saying what is loaded, instead of
+                 the whole guide. -->
+            <div id="wiz-model-ready" class="set-card" data-open="no">
+              <div class="set-row">
+                <div class="set-row__main">
+                  <span class="set-row__label">Model</span>
+                </div>
+                <span id="wiz-model-summary" class="set-row__control set-row__value"></span>
+              </div>
+            </div>
+            <div id="wiz-model-guide" class="model-guide" data-open="yes"></div>
+            <section class="settings">
+              <div class="settings__head">
+                <h2 class="settings__title">Your models folder</h2>
+                <span id="wiz-dir" class="muted"></span>
+              </div>
+              <!-- Same list, same rows and same reasons as the repair panel:
+                   what is in the folder, and what is in there that is not a
+                   model. -->
+              <ul id="wiz-models" class="settings__list"></ul>
+              <!-- The same two actions as Settings. Nothing here
+                   writes to the folder; the user does. -->
+              <div class="empty__actions">
+                <button id="wiz-model-reveal" type="button" class="linkish">
+                  Open models folder
+                </button>
+                <button id="wiz-model-rescan" type="button" class="linkish"
+                        title="Read the models folder again — Sotone does not watch it">
+                  Rescan
+                </button>
+              </div>
+            </section>
+          </section>
+
+          <!-- 6 · The first project. The slug echoed under the field is
+               `project_slug_preview` in Rust — the one sanitizer, never
+               a second copy of the rules in JavaScript. -->
+          <section class="wiz" data-step="6">
+            <h2 class="wiz__title">Name your first project</h2>
+            <p class="wiz__prose">
+              A project is a folder of notes — usually a build, a product, or a
+              series of test sessions. You can add more later from the sidebar.
+            </p>
+            <!-- The placeholder names the field; it never invents an example.
+                 A greyed-out product name reads as a value that is
+                 already there. -->
+            <input id="wiz-project" class="wiz-field" type="text"
+                   spellcheck="false" placeholder="Project name"
+                   aria-label="Project name" />
+            <p id="wiz-slug" class="wiz__example"></p>
+          </section>
+
+          <!-- 7 · Ready. Only what the user actually chose, read back. No
+               confetti and no celebration state — the reward is the app
+               opening. -->
+          <section class="wiz" data-step="7">
+            <h2 class="wiz__title">Ready</h2>
+            <p class="wiz__prose">
+              Sotone starts off. Turn it on from the button in the title bar when
+              a session begins — until you do, the microphone stays shut.
+            </p>
+            <div class="set-card">
+              <ul id="wiz-summary" class="set-list"></ul>
+            </div>
+          </section>
+        </div>
+
+        <!-- The third rendering of the one message slot: a refused
+             clipboard write or a rejected model file has to be readable here
+             too, and there is still exactly one latest-wins message. Between
+             the body and the footer, so it never moves the step above it.
+             `data-open`, never `hidden`. -->
+        <p id="wiz-message" class="empty__message onboarding__message"
+           data-open="no"></p>
+
+        <!-- The footer: step count in mono at the left, actions at the right.
+             Back is a quiet text button and never a chevron; the primary is
+             `--faint` and inert until the step's requirement is met, and is
+             **never hidden or removed**. -->
+        <div class="onboarding__foot">
+          <span id="wiz-count" class="onboarding__count">1 of 7</span>
+          <span class="onboarding__actions">
+            <button id="wiz-back" type="button" class="wiz-btn wiz-btn--quiet"
+                    data-open="no">
+              Back
+            </button>
+            <button id="wiz-next" type="button" class="wiz-btn wiz-btn--primary"
+                    data-live="yes">
+              Get started
+            </button>
+          </span>
+        </div>
+      </section>
+
+      <!-- The session proper. Two shells live in here and exactly one is on
+           screen: the notes shell (sidebar tree + transcript) and the settings
+           shell (tab sidebar + settings pane). `data-view` swaps them.
+
+           Settings is a view swap and not a second OS window, by design:
+           every piece of state in this app arrives as an event into one
+           webview, so a second window would duplicate every listener and the
+           capability surface for no user gain. The swap is DOM only — nothing
+           here shows, activates or focuses a window (invariant 2) — and because
+           the notes shell is only display-swapped, the tree's collapse state,
+           its active row and the open pane all survive the round trip
+           untouched. -->
+      <!-- `data-searching` is `no` / `note` / `library` — the design's
+           `search: { term, scope }` as one attribute, with the scope implied by
+           whether a note is open. It sits here rather than on the
+           pane because both the sidebar and the pane change with it, and every
+           appearance change hangs off it in CSS. -->
+      <section id="view-ready" class="view" hidden data-view="notes"
+               data-searching="no">
+        <div id="shell-notes" class="shell">
+          <!-- The sidebar tree replaces both a flat drafts list
+               and a separate Projects tab. Notes exist only within projects,
+               so a tree of projects *is* the notes list. -->
+          <aside class="sidebar">
+            <!-- The 49px top block: the design's search field and sort control
+                 on one row. The block keeps its height so its
+                 hairline lines up with the pane header's. -->
+            <div class="sidebar__top">
+              <!-- Search. One field,
+                   two behaviours — with a note open it filters the tree and the
+                   transcript, with none it lists the notes that contain the
+                   term — and an empty or all-whitespace term IS search-off.
+                   There is no second switch, which is why the keycap beside it
+                   says `esc` rather than being a toggle. -->
+              <div class="search">
+                <svg class="search__icon" width="12" height="12" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2.4"
+                     aria-hidden="true">
+                  <circle cx="10.5" cy="10.5" r="6.5"></circle>
+                  <path d="M15.5 15.5 L21 21" stroke-linecap="round"></path>
+                </svg>
+                <!-- `type="text"`, not `search`: the engine's own clear glyph
+                     would be a second control saying the same thing as the
+                     keycap, in a place the design does not draw one. -->
+                <input id="search" class="search__input" type="text"
+                       placeholder="Search notes" aria-label="Search notes"
+                       autocomplete="off" spellcheck="false" />
+                <!-- Drawn as the keycap the mock shows, and it works: a hint
+                     that is also the control is one affordance, not two. It
+                     only exists while there is a term to clear. -->
+                <button id="search-clear" type="button" class="search__esc"
+                        data-open="no" title="Clear the search (Esc)">esc</button>
+              </div>
+
+              <!-- Sort order is presentation only, by design: the
+                   backend always sends the list in creation order and this
+                   reorders a copy, within each group. A native <select> on
+                   purpose — the OS draws the menu, and a hand-rolled one would
+                   be a popup this window has to own. It is the
+                   design's compact sort *button*: the glyph is the control and
+                   the select sits transparently over it, because the field
+                   beside it needs the width and a <select> is as wide as its
+                   longest option. Its options, its id and its aria-label are
+                   unchanged.
+
+                   There is deliberately no filter dropdown beside it:
+                   grouping answers what one would be asked, and the rule it
+                   carried — the active note is always visible — is carried by
+                   force-opening the group that holds it. -->
+              <span class="sort">
+                <span class="sort__icon" aria-hidden="true">
+                  <i></i><i></i><i></i>
+                </span>
+                <select id="draft-sort" class="sort__select" aria-label="Sort notes">
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                  <option value="name">Name, A–Z</option>
+                  <option value="lines">Line count, high to low</option>
+                </select>
+              </span>
+            </div>
+
+            <!-- Notepad semantics: every outstanding draft is in here
+                 somewhere, and nothing is ever hidden — a row that vanishes
+                 reads as lost work. Clicking a row resumes it; new lines
+                 append to whichever is marked active. Discard is a two-step
+                 control, never a browser confirm() — a modal would steal focus
+                 from whatever is being tested (invariant 2). -->
+            <div class="sidebar__tree">
+              <div class="tree__head">
+                <span class="tree__label">Projects</span>
+                <!-- "6 matches · 3 notes": the tree's own heading
+                     while a term is active, in the label's place. The `+` stays
+                     — search filters what is listed, it does not take controls
+                     away. -->
+                <span id="search-count" class="tree__found" data-open="no"></span>
+                <!-- A project is a folder with a notes template; the `+` on a
+                     project row makes a note *inside* one. This makes the
+                     folder. -->
+                <button id="project-new-open" type="button" class="tree__new"
+                        title="New project" aria-label="New project">+</button>
+              </div>
+              <!-- `data-recording` is what puts the `--live` dot on the active
+                   note. It is set from the recording event and read by CSS, so
+                   one attribute decides it for whichever row is active — a
+                   per-row render could leave the dot behind. -->
+              <ul id="draft-list" class="tree" data-recording="no"></ul>
+            </div>
+
+            <!-- The 36px footer, mirroring the pane's: gear then label, top
+                 hairline. It swaps the whole body below the title bar
+                 for the settings shell — sidebar included — and the row pinned
+                 at the bottom of *that* sidebar swaps it back. -->
+            <div class="sidebar__foot">
+              <button id="open-settings" type="button" class="sidebar__settings">
+                <svg class="icon" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+                <span>Settings</span>
+              </button>
+            </div>
+          </aside>
+
+          <!-- The main area. Which pane shows travels as `data-current`, never
+               as the `hidden` attribute — the rule that shows a pane sets
+               `display`, and an author display rule beats the UA sheet's
+               `[hidden] { display: none }`. -->
+          <div class="main">
+            <!-- The pane: 49px header, the transcript card, 36px footer.
+                 `data-empty` swaps the card for the invite below — a data
+                 attribute, not the `hidden` attribute, because the rules that
+                 show them set `display`. -->
+            <!-- `data-condition` is the whole of the error-state treatment
+                 and it carries exactly what the backend published on
+                 `sotone://condition` — never something this window inferred from
+                 a notice (inferring it from one is a stale-snapshot bug).
+                 `none` when nothing is wrong. CSS owns every appearance change
+                 that hangs off it: the dimmed card, the faint header actions,
+                 the pane takeover. A data attribute and not the `hidden`
+                 attribute, because those rules set `display`. -->
+            <!-- `data-selection` is `none` / `some`: while lines
+                 are selected the header is the selection's toolbar and the
+                 footer counts the set. CSS owns both swaps — main.js only
+                 names the state — and the attribute is on the pane rather
+                 than on `#view-ready` because a selection is a fact about
+                 one note's transcript. -->
+            <div id="pane-session" class="pane" data-current="yes"
+                 data-empty="no" data-condition="none" data-selection="none">
+              <!-- Which note is on screen, how much of it there is, and the
+                   four controls that act on it. -->
+              <div class="pane__header">
+                <!-- The selection's left half: the count
+                     and the mono `esc to clear`, in the place the breadcrumb
+                     holds the rest of the time. Both are hidden while the set
+                     is empty — a `display` rule, never the `hidden`
+                     attribute. -->
+                <span id="sel-count" class="crumb crumb--sel"></span>
+                <span id="sel-hint" class="pane__esc">esc to clear</span>
+                <!-- Each crumb and its pencil share a slot:
+                     hovering the name reveals the pencil, and the two must
+                     not be separated by the header's own gap or the pointer
+                     would lose the control on the way to it. The field opens
+                     **in place**, inside the slot, which is why the slot and
+                     not the span is what carries `data-renaming`. -->
+                <span id="slot-project" class="crumb__slot" data-renaming="no">
+                  <span id="note-project" class="crumb crumb--project">no project</span>
+                  <button id="rename-project" type="button"
+                          class="pencil crumb__pencil" data-show="no"
+                          title="Rename this project" aria-label="Rename this project">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round"
+                         aria-hidden="true">
+                      <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+                    </svg>
+                  </button>
+                </span>
+                <span class="crumb__sep" aria-hidden="true">/</span>
+                <span id="slot-note" class="crumb__slot crumb__slot--note"
+                      data-renaming="no">
+                  <span id="note-title" class="crumb crumb--note">no note yet</span>
+                  <button id="rename-note" type="button"
+                          class="pencil crumb__pencil" data-show="no"
+                          title="Rename this note" aria-label="Rename this note">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round"
+                         aria-hidden="true">
+                      <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+                    </svg>
+                  </button>
+                </span>
+                <!-- Library scope: with no note open there
+                     is no breadcrumb to show, so the header says what the pane
+                     is listing instead. CSS swaps the two on
+                     `#view-ready[data-searching]`. -->
+                <span id="search-title" class="crumb crumb--found"></span>
+                <span class="pane__meta">
+                  <span id="line-count">0 lines</span>
+                  <span id="line-time"></span>
+                  <!-- "4 matching lines" in note scope, "3 notes · 6 lines" in
+                       library scope. Same
+                       mono meta slot as the line count, which is what they
+                       replace while a term is active. -->
+                  <span id="pane-matches"></span>
+                  <span id="search-meta"></span>
+                </span>
+                <!-- Step-by-step undo, by design: one
+                     correction at a time, with redo, plus Ctrl+Z /
+                     Ctrl+Shift+Z / Ctrl+Y. Always present and dimmed when
+                     there is nothing to do, rather than appearing and
+                     disappearing under the cursor. Undo only ever re-issues an
+                     editing command — it can never delete a dictated line. -->
+                <span class="pane__actions">
+                  <button id="lines-undo" type="button" class="action" disabled
+                          title="Undo the last edit (Ctrl+Z)">
+                    Undo
+                  </button>
+                  <button id="lines-redo" type="button" class="action" disabled
+                          title="Redo the last undone edit (Ctrl+Shift+Z)">
+                    Redo
+                  </button>
+                  <!-- Save all, store-wide. Every dirty
+                       note in the store, whatever project it belongs to, in one
+                       act — the words on the button, read the way VS Code reads
+                       them. Each note saves under its
+                       own project's rules. Guarded like any save: a note
+                       stopped by an external edit is reported and skipped,
+                       never overwritten from a batch, and there is no shortcut
+                       for it on purpose.
+
+                       The title here is the *disabled* state's; main.js
+                       rewrites it from the drafts payload on every render. -->
+                  <button id="lines-save-all" type="button" class="action" disabled
+                          title="Every note is saved">
+                    Save all
+                  </button>
+                  <!-- Save. Enabled only when there is an active
+                       note with unsaved changes and no recording is live;
+                       Ctrl+S does the same thing under the same gates. The
+                       tooltip names the file this note is bound to, or the
+                       folder a first save will land in — a save must never be
+                       a surprise about where. -->
+                  <button id="lines-save" type="button" class="action action--primary"
+                          disabled title="Save this note to markdown (Ctrl+S)">
+                    Save
+                  </button>
+                  <!-- Search's own two, which take the actions' place while a
+                       term is active. "Show whole note" **clears the
+                       search** — the same thing Escape does — rather than
+                       opening a third state where the tree is filtered and the
+                       pane is not. The sort echo is a readout, not a second
+                       control: the sort itself lives in the sidebar. -->
+                  <button id="search-exit" type="button" class="action"
+                          title="Clear the search and show the whole note">
+                    Show whole note
+                  </button>
+                  <span id="search-sort" class="pane__echo"></span>
+                </span>
+                <!-- The selection's actions. Its own
+                     block rather than two more children of `.pane__actions`:
+                     hiding the whole group is one rule that cannot lose a
+                     specificity argument with search's own header swap, and a
+                     selection outranks a search in the header because it is
+                     the state the user entered last.
+
+                     Three actions, in the mock's order:
+                     Copy · Move to note… · Delete N. The mock's "Export" is
+                     still deliberately **not** built — it is undefined, and
+                     the decision that brought in "Move to note…"
+                     deliberately left it out. -->
+                <span class="pane__sel">
+                  <button id="sel-copy" type="button" class="action">Copy</button>
+                  <!-- Move to note… opens the chooser below
+                       rather than acting: the destination is a question, and
+                       this app asks it in the page. Disabled with the reason
+                       in its `title` while a recording is live, while the
+                       changed-on-disk question holds the note, when every
+                       selected row is already out of it, and when there is no
+                       other note to move to — offered-and-refused is the thing
+                       this app does not do. -->
+                  <button id="sel-move" type="button" class="action">Move to note…</button>
+                  <!-- The one destructive control in the header. It is
+                       `--bad` text (the design draws it bare, with no second
+                       confirm: an explicit multi-select is already
+                       deliberate, and one compound Undo reverses it), and it
+                       is disabled — with the reason in its `title` — while a
+                       recording is live or the changed-on-disk question is
+                       holding the note. -->
+                  <button id="sel-delete" type="button"
+                          class="action action--bad"></button>
+                </span>
+              </div>
+
+              <!-- The condition strip. It sits
+                   between the pane header and the transcript card and **pushes
+                   the content down** rather than covering it — the design's
+                   rule, and the reason this is an in-flow block and not the
+                   fixed-position popup it replaces.
+
+                   One strip at a time, because `condition` is one value. It
+                   stays until the condition clears or the user dismisses it:
+                   no toast, no timer, nothing that disappears before it is
+                   read. The hotkey-dead condition does not use it at all — that
+                   one takes the whole pane, below.
+
+                   `data-open`, never `hidden`: the rule that shows it sets
+                   `display` and `grid-template-rows`. -->
+              <div id="condition-strip" class="strip" data-open="no"
+                   role="status" aria-live="polite">
+                <div class="strip__box">
+                  <div class="strip__main">
+                    <span id="strip-title" class="strip__title"></span>
+                    <span id="strip-note" class="strip__note"></span>
+                  </div>
+                  <div class="strip__actions">
+                    <!-- Quiet, and collapsed by default: the diff is an answer
+                         to "what would I lose", asked only by someone who wants
+                         it. Its own control rather than a second primary,
+                         because the design allows at most one primary action. -->
+                    <button id="strip-diff" type="button" class="strip__quiet"
+                            data-show="no">Show what changed</button>
+                    <button id="strip-dismiss" type="button" class="strip__quiet"
+                            data-show="no"></button>
+                    <button id="strip-primary" type="button" class="strip__primary"
+                            data-show="no"></button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Post-session tidy-up. Newest at the
+                   bottom. Row grammar is the design's:
+                   `grip · 74px timestamp · line · actions`, hairline between
+                   rows, grip and actions revealed on hover. Clicking a line's
+                   text opens the editor in place. Editing is disabled while a
+                   recording is live: a contenteditable line mid-dictation is a
+                   footgun, and editing is a post-session act. -->
+              <ul id="line-list" class="transcript"></ul>
+
+              <!-- Library scope: with nothing open there
+                   is no transcript to filter, so the same card lists the notes
+                   that contain the term — name, project, match count, when it
+                   was last written, and the first matching line as a one-line
+                   preview. Clicking one activates that draft and the view
+                   becomes note scope for it. -->
+              <ul id="search-results" class="transcript"></ul>
+
+              <!-- "Show what changed", expanded inside the dimmed card region.
+                   It is an LCS line diff, in the card rather
+                   than in a popup: strike-through on the left is what would be
+                   lost, bold on the right is what would be written. The
+                   centred popup this replaces is deliberately gone.
+
+                   It shares the card's 55% opacity, so it reads as part of the
+                   note that is out of service rather than as a new panel. -->
+              <div id="conflict-diff" class="cdiff" data-open="no">
+                <div class="cdiff__panes">
+                  <div class="cdiff__pane">
+                    <h3 class="cdiff__label">On disk</h3>
+                    <pre id="cdiff-disk" class="cdiff__text"></pre>
+                  </div>
+                  <div class="cdiff__pane">
+                    <h3 class="cdiff__label">Sotone would write</h3>
+                    <pre id="cdiff-pending" class="cdiff__text"></pre>
+                  </div>
+                </div>
+                <!-- A line landed while the question was open, so the
+                     right-hand side is older than the note. Said out loud
+                     rather than silently redrawn: the pending text is what the
+                     *refused* save would have written, and this window cannot
+                     re-render the markdown itself. -->
+                <p id="cdiff-stale" class="cdiff__stale" data-open="no">
+                  A line has landed since this comparison — Keep mine writes the
+                  note as it reads now, which is newer than the right-hand side.
+                </p>
+              </div>
+
+              <!-- Until a project holds a note, the pane is the place to make
+                   one (design's second frame). After that, notes are created
+                   from the `+` on the project row, the way a file is added
+                   inside a folder in an editor. -->
+              <div id="note-empty" class="invite">
+                <span class="invite__glyph" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i>
+                </span>
+                <h2 id="invite-title" class="invite__title">No notes yet</h2>
+                <p id="invite-note" class="invite__note"></p>
+                <div class="invite__actions">
+                  <button id="draft-new" type="button" class="button">New note</button>
+                </div>
+                <p id="invite-path" class="invite__path"></p>
+              </div>
+
+              <!-- The hotkey-dead takeover.
+                   The failure that removes the app's whole purpose does not get
+                   a strip: it takes the pane, in the same card, centred, with
+                   one primary action and a recheck. The sidebar and Settings
+                   stay reachable — the pane is taken, not the window.
+
+                   The copy is ours, not the canvas's. The canvas names a
+                   Windows cause ("another app is already holding the hotkey")
+                   that belongs to `RegisterHotKey`; Sotone uses a low-level
+                   hook in a helper process and has no such failure. The
+                   sentence comes from the condition's own detail instead. -->
+              <div id="hotkey-dead" class="takeover">
+                <div class="takeover__body">
+                  <h2 class="takeover__title">Sotone cannot see your keys</h2>
+                  <p id="hotkey-dead-note" class="takeover__note"></p>
+                </div>
+                <div class="takeover__actions">
+                  <button id="hotkey-restart" type="button" class="button">
+                    Restart Sotone
+                  </button>
+                  <!-- The lever the restart limit never had: one more attempt
+                       at the helper, with the counter back at zero. Failing
+                       lands back on this screen with the fresh reason. -->
+                  <button id="hotkey-recheck" type="button"
+                          class="button button--quiet">
+                    Recheck
+                  </button>
+                </div>
+              </div>
+
+              <!-- Where this note goes, whether it is behind, and what this
+                   process actually loaded — the glance version of Settings →
+                   This session, kept because a Vulkan build that quietly fell
+                   back to CPU is exactly the thing a glance should catch.
+
+                   It also carries the two error-state readouts: the
+                   one-line message slot (the latest refusal or failure, which
+                   is where the notice list's traffic went), and the condition's
+                   plain cause in mono at the right. -->
+              <div class="pane__footer">
+                <!-- What a rename is about to change on disk, so nothing
+                     happens silently. It takes the
+                     path's place while a field is open — one left slot, one
+                     statement — and the path that will change is stated at the
+                     right in `#rename-path`. -->
+                <span id="pane-rename" class="foot__rename" data-open="no"></span>
+                <span id="note-path" class="foot__path"></span>
+                <span id="pane-message" class="foot__message" data-open="no"></span>
+                <span class="foot__right">
+                  <!-- How far behind the file is, in lines Sotone has in memory
+                       and could not write.
+                       The count *is* the surface a held line gets: there is no
+                       message per hold, because one per retry is the flood the
+                       notices funeral removed. `data-open`, never `hidden`. -->
+                  <span id="pane-held" class="foot__held" data-open="no"></span>
+                  <span id="pane-condition" class="foot__condition"
+                        data-open="no"></span>
+                  <!-- "6 matches · 3 notes · 2 projects" in note scope,
+                       "sorted by newest first" in library scope.
+                       The footer's left keeps the file path either way. -->
+                  <span id="search-facts" class="foot__found"
+                        data-open="no"></span>
+                  <!-- "3 of 12 selected". Same
+                       `data-open` grammar as the two counters beside it. -->
+                  <span id="sel-facts" class="foot__sel" data-open="no"></span>
+                  <!-- The path a rename is about to change: the note's `.md`
+                       file, or the project's folder. Same `data-open`
+                       grammar again. -->
+                  <span id="rename-path" class="foot__renaming"
+                        data-open="no"></span>
+                  <span id="note-state" class="foot__state" data-open="no"></span>
+                  <span id="pane-facts" class="foot__facts"></span>
+                </span>
+              </div>
+            </div>
+
+            <!-- One project's folder and templates, opened from the edit
+                 affordance on its row in the tree. Notes exist only within
+                 projects, so this is where a note gets
+                 somewhere to go. Every field commits on change and is written
+                 straight back to the config file, comments and all; the
+                 `sotone://projects` event that comes back is the only
+                 confirmation, so the panel is rebuilt from it rather than
+                 patched. -->
+            <div id="pane-project" class="pane">
+              <div class="pane__head">
+                <h2 class="pane__title">Project</h2>
+                <span class="muted">edits save to your config file as you make them</span>
+                <button id="project-close" type="button"
+                        class="linkish pane__back">
+                  back to notes
+                </button>
+              </div>
+              <div id="project-panel" class="projects"></div>
+            </div>
+
+            <div id="pane-new-project" class="pane">
+              <div class="pane__head">
+                <h2 class="pane__title">New project</h2>
+                <button id="new-project-close" type="button"
+                        class="linkish pane__back">
+                  back to notes
+                </button>
+              </div>
+              <div class="projects">
+                <div class="field">
+                  <label class="field__label" for="new-project-name">Name</label>
+                  <input id="new-project-name" class="field__input" type="text"
+                         placeholder="Project name" spellcheck="false" />
+                </div>
+                <div class="field">
+                  <label class="field__label" for="new-project-dir">Notes folder</label>
+                  <input id="new-project-dir" class="field__input" type="text"
+                         placeholder="Pick a folder" spellcheck="false" />
+                  <!-- One of the two native dialogs in Sotone, and it only ever
+                       opens from this click. A folder cannot be chosen in-page:
+                       the webview has no filesystem access. -->
+                  <button id="new-project-browse" type="button" class="linkish">Browse…</button>
+                </div>
+                <!-- The switch on the project dialog, which works the way
+                     Godot's does. On by default, and reset to
+                     on every time this pane is opened: the picked folder is a
+                     place to *put* the project, not the project's own home.
+                     Binding a whole notes root as one project's folder is what
+                     carried every other project away on a rename. -->
+                <div class="field">
+                  <span class="field__label" aria-hidden="true"></span>
+                  <label class="toggle">
+                    <input id="new-project-subfolder" type="checkbox"
+                           class="toggle__box" checked />
+                    <span class="toggle__knob" aria-hidden="true"></span>
+                  </label>
+                  <label class="muted" for="new-project-subfolder">
+                    Create a folder with the project name inside it
+                  </label>
+                </div>
+                <!-- The exact folder the project gets, in the wizard's own
+                     words. The file-safe name in it is rendered by Rust
+                     (`project_slug_preview`), never by this page. -->
+                <div class="field">
+                  <span class="field__label" aria-hidden="true"></span>
+                  <span id="new-project-echo" class="field__preview"></span>
+                </div>
+                <div class="field">
+                  <button id="new-project-create" type="button" class="linkish">
+                    Create project
+                  </button>
+                </div>
+                <p class="muted">
+                  A project is a folder: every note you save into it lands
+                  there, named by its filename template.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings, laid out as the design draws it.
+             Every control here is an editor over the config file: a change is
+             one command and the backend writes the file back with the user's
+             comments and key order intact. Nothing is optimistically
+             re-rendered — the `sotone://settings` event that comes back is the
+             confirmation, which is why no control in here decides anything
+             locally and why a refusal (the last recording mode, the model in
+             use, anything at all while a recording is live) simply leaves the
+             control as it was.
+
+             Every row applies to the *running* process: the
+             microphone reconnects, a chosen model is loaded and handed to the
+             worker, the language is a decoding parameter on the model already
+             loaded. There is no restart marker anywhere in here any more, and
+             no pending-change computation behind one.
+
+             There is no Save, OK or Cancel anywhere in here, and there never
+             was — the header says "changes apply immediately" once, which is
+             the design's rule. -->
+        <div id="shell-settings" class="shell">
+          <aside class="sidebar sidebar--settings">
+            <!-- The tabs the app actually has. Notes and Shortcuts are drawn in
+                 the design and are not built: they map to nothing Sotone does,
+                 and the design's own rule is that anything drawn the app does
+                 not do gets deleted rather than built. -->
+            <nav id="settings-tabs" class="tabs" aria-label="Settings sections">
+              <button id="tab-general" type="button" class="tab"
+                      data-tab="general" data-selected="yes">General</button>
+              <button id="tab-recording" type="button" class="tab"
+                      data-tab="recording" data-selected="no">Recording</button>
+              <button id="tab-transcription" type="button" class="tab"
+                      data-tab="transcription" data-selected="no">Transcription</button>
+              <button id="tab-overlay" type="button" class="tab"
+                      data-tab="overlay" data-selected="no">Overlay</button>
+              <button id="tab-about" type="button" class="tab"
+                      data-tab="about" data-selected="no">About</button>
+            </nav>
+
+            <!-- The mirror of the Settings row in the notes sidebar: 36px, top
+                 hairline, bleeding to the sidebar's edges. Exempt from the
+                 capture inerting, like Cancel: a question about a keypress must
+                 never also trap the user in this view. -->
+            <div class="sidebar__foot">
+              <button id="settings-close" type="button"
+                      class="sidebar__settings sidebar__back"
+                      data-capture-control="yes">
+                <svg class="icon" width="13" height="13" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2.4"
+                     stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true">
+                  <path d="M15 5 L8 12 L15 19"></path>
+                </svg>
+                <span>Back to notes</span>
+              </button>
+            </div>
+          </aside>
+
+          <div class="main">
+            <div id="pane-settings" class="settings-pane" data-capturing="no"
+                 data-tab="general">
+              <div class="settings-pane__header">
+                <h2 id="settings-tab-name" class="settings-pane__title">General</h2>
+                <span class="settings-pane__note">Changes apply immediately</span>
+              </div>
+
+              <div class="settings-pane__body">
+                <section class="settings-tab" data-tab="general">
+                  <div class="set-section">
+                    <div class="set-section__label">Appearance</div>
+                    <div class="set-card">
+                      <!-- The one control in this whole view that is accepted
+                           while a recording is live: a theme touches no engine,
+                           no helper and no draft state. -->
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <label class="set-row__label" for="theme-select">Theme</label>
+                          <span class="set-row__note">
+                            Sets the colours of this window and the overlay.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <span class="pick">
+                            <select id="theme-select" class="pick__select">
+                              <option value="dark">Dark</option>
+                              <option value="light">Light</option>
+                            </select>
+                            <span class="pick__caret" aria-hidden="true"></span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="set-section">
+                    <div class="set-section__label">Sound</div>
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Recording cues</span>
+                          <span class="set-row__note">
+                            Plays a short tone when a recording starts, when a
+                            line is transcribed, and when a long recording is
+                            split at two minutes. Turn it off for silence.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <label class="toggle">
+                            <input id="cue-toggle" type="checkbox" class="toggle__box"
+                                   aria-label="Play the recording cues" />
+                            <span class="toggle__knob" aria-hidden="true"></span>
+                          </label>
+                        </span>
+                      </div>
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Cue output</span>
+                          <span class="set-row__note">
+                            The output device this session opened to play them.
+                          </span>
+                        </div>
+                        <span id="cue-device" class="set-row__control set-row__value"></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="set-section">
+                    <div class="set-section__label">Window</div>
+                    <div class="set-card">
+                      <!-- The row is a readout of `close_quits` on
+                           the settings event like every other control here;
+                           the close itself is decided in the backend, at the
+                           moment the X is pressed. -->
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Closing the window quits Sotone</span>
+                          <span class="set-row__note">
+                            Normally the X hides this window and Sotone keeps
+                            listening from the notification area, where Exit
+                            Sotone is the way out. Turn this on and the X quits
+                            instead, exactly as that Exit does.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <label class="toggle">
+                            <input id="close-quits-toggle" type="checkbox" class="toggle__box"
+                                   aria-label="Closing the window quits Sotone" />
+                            <span class="toggle__knob" aria-hidden="true"></span>
+                          </label>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-tab" data-tab="recording">
+                  <div class="set-section">
+                    <div class="set-section__label">Capture keys</div>
+                    <!-- The two rows are built from the settings event
+                         (`#hotkey-list`); the question below them is a row in
+                         the same card, so a rebind is answered where it was
+                         asked. -->
+                    <div class="set-card">
+                      <ul id="hotkey-list" class="set-list"></ul>
+                      <!-- The capture state comes from the backend, so a
+                           refresh cannot strand this row on screen. In-page
+                           DOM, never a native dialog: this window does not take
+                           focus (invariant 2). `data-open`, never the `hidden`
+                           attribute — the rule that shows it sets `display`
+                          . -->
+                      <div id="capture-panel" class="set-row set-row--ask" data-open="no">
+                        <div class="set-row__main">
+                          <span id="capture-label" class="set-row__label"></span>
+                          <span class="set-row__note">
+                            Both capture keys stop working until this finishes.
+                            Sotone has one key listener and it is waiting for
+                            your press.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <button id="capture-cancel" type="button" class="set-action"
+                                  data-capture-control="yes">
+                            Cancel
+                          </button>
+                        </span>
+                      </div>
+                    </div>
+                    <p class="set-section__note">
+                      Press the key or button you want; you never type a key
+                      code. Mouse side buttons work too, though binding one
+                      puts Sotone on the mouse path — a keyboard key keeps it
+                      off entirely, which a demanding game may prefer. Whatever
+                      you pick still reaches the app you are testing, so pick
+                      something that app ignores.
+                    </p>
+                  </div>
+
+                  <div class="set-section">
+                    <div class="set-section__label">Input</div>
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <label class="set-row__label" for="mic-select">Microphone</label>
+                          <span class="set-row__note">
+                            The microphone Sotone records from. It switches
+                            straight away, and remembers the device by name — not
+                            by port — so unplugging and replugging it still
+                            works.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <span class="pick">
+                            <select id="mic-select" class="pick__select"></select>
+                            <span class="pick__caret" aria-hidden="true"></span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-tab" data-tab="transcription">
+                  <div class="set-section">
+                    <div class="set-section__label">Model</div>
+                    <!-- Model rows and the language row share one card, as the
+                         design draws them: the language is a property of the
+                         transcription, not a separate concern. -->
+                    <div class="set-card">
+                      <ul id="model-list" class="set-list"></ul>
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <label class="set-row__label" for="language-select">Language</label>
+                          <span class="set-row__note">
+                            The language you speak. Naming it is faster and more
+                            accurate than letting Sotone detect it, and it applies
+                            to the next line you speak.
+                          </span>
+                          <!-- Filled in only when the loaded model is
+                               English-only, which ignores this setting
+                               entirely. Not an error, so it says what is true
+                               rather than what went wrong. -->
+                          <span id="language-note" class="set-row__warn"
+                                data-open="no"></span>
+                        </div>
+                        <span class="set-row__control">
+                          <span class="pick">
+                            <!-- Options come from the settings event: the list
+                                 is whisper's own language table, read in Rust.
+                                 A copy here would go stale. -->
+                            <select id="language-select" class="pick__select"></select>
+                            <span class="pick__caret" aria-hidden="true"></span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                    <!-- The folder is the management
+                         surface. Sotone reads it and never writes to it, which
+                         is why there is no Add and no Remove here any more. -->
+                    <p class="set-section__note">
+                      Transcription runs on this machine and nothing is
+                      uploaded. Choosing a model loads it now: that takes a
+                      moment, and every line after it uses that model. Models
+                      live in the folder below and you manage them there — drop
+                      a <code>.bin</code> file in to add one, delete it to
+                      remove one, then press Rescan. Sotone never adds, moves or
+                      deletes a file in that folder.
+                    </p>
+                  </div>
+
+                  <div class="set-section">
+                    <div class="set-section__label">Models folder</div>
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Location</span>
+                          <span id="models-dir" class="set-row__path"></span>
+                        </div>
+                        <!-- The whole management surface: open the
+                             folder, and read it again. The reveal is the
+                             existing `project_reveal` — it opens a local
+                             folder in the user's own file manager and fetches
+                             nothing (invariant 3). Rescan is a directory read;
+                             there is no watcher, because a watcher is a
+                             dependency this does not need. -->
+                        <span class="set-row__control">
+                          <button id="models-reveal" type="button" class="set-button">
+                            Open models folder
+                          </button>
+                          <button id="models-rescan" type="button" class="set-button"
+                                  title="Read the models folder again — Sotone does not watch it">
+                            Rescan
+                          </button>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- The design's three rows. The master switch owns
+                     the two under it: with the overlay off they go `--faint`
+                     and stop taking input, and they are never hidden. -->
+                <section class="settings-tab" data-tab="overlay">
+                  <div class="set-section">
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Show overlay</span>
+                          <span class="set-row__note">
+                            A pill that stays on top of other windows: the logo
+                            while nothing is happening, a level meter and a clock
+                            while you are speaking, then the line you just said.
+                            It never takes focus. A fullscreen game covers it, so
+                            there the cues are what still reaches you.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <label class="toggle">
+                            <input id="overlay-toggle" type="checkbox" class="toggle__box"
+                                   aria-label="Show the always-on-top overlay" />
+                            <span class="toggle__knob" aria-hidden="true"></span>
+                          </label>
+                        </span>
+                      </div>
+                      <div class="set-row" data-subordinate="overlay">
+                        <div class="set-row__main">
+                          <label class="set-row__label" for="overlay-corner">
+                            Dock corner
+                          </label>
+                          <span class="set-row__note">
+                            Which corner of the screen the pill sits in. It grows
+                            away from that corner, so it never drifts into the
+                            middle of what you are testing.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <span class="pick">
+                            <select id="overlay-corner" class="pick__select">
+                              <option value="bottomLeft">Bottom left</option>
+                              <option value="bottomRight">Bottom right</option>
+                              <option value="topLeft">Top left</option>
+                              <option value="topRight">Top right</option>
+                            </select>
+                            <span class="pick__caret" aria-hidden="true"></span>
+                          </span>
+                        </span>
+                      </div>
+                      <div class="set-row" data-subordinate="overlay">
+                        <div class="set-row__main">
+                          <label class="set-row__label" for="reveal-seconds">
+                            Show a line for
+                          </label>
+                          <span class="set-row__note">
+                            How long a transcribed line stays on the pill before
+                            it collapses back to the logo. A hairline drains
+                            along the bottom edge while it does.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <span class="pick">
+                            <!-- The odd value a hand-edited config can hold is
+                                 added to this list by main.js, so the control
+                                 always shows what is actually in force. -->
+                            <select id="reveal-seconds" class="pick__select">
+                              <option value="3">3 seconds</option>
+                              <option value="5">5 seconds</option>
+                              <option value="10">10 seconds</option>
+                              <option value="15">15 seconds</option>
+                              <option value="20">20 seconds</option>
+                              <option value="30">30 seconds</option>
+                              <option value="45">45 seconds</option>
+                              <option value="60">60 seconds</option>
+                            </select>
+                            <span class="pick__caret" aria-hidden="true"></span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-tab" data-tab="about">
+                  <div class="set-section">
+                    <div class="set-section__label">The app</div>
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Sotone</span>
+                          <!-- The version, straight under the name, in the same
+                               `--dim` note grammar as the sentence below it —
+                               no new visual grammar for one line of fact.
+                               It is filled from the settings event, so
+                               the page never hardcodes a number that would go
+                               stale; empty until the first event lands, which
+                               is a blank line rather than a wrong one. -->
+                          <span id="app-version" class="set-row__note"></span>
+                          <span class="set-row__note">
+                            <em>Sotone voce</em> — spoken quietly and aside. Hold
+                            a key, say one finding, release: it is transcribed
+                            here and appended to a markdown note as one
+                            timestamped line.
+                          </span>
+                        </div>
+                        <span class="glyph set-row__glyph" aria-hidden="true">
+                          <i></i><i></i><i></i><i></i>
+                        </span>
+                      </div>
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Local only</span>
+                          <span class="set-row__note">
+                            No account, no telemetry and no network call of its
+                            own: you bring the model, Sotone transcribes with it
+                            here. MIT licensed, and it never types into the
+                            window you are testing.
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="set-section">
+                    <div class="set-section__label">This session</div>
+                    <!-- What this process actually loaded, which is not always
+                         what the config says: a Vulkan build that quietly fell
+                         back to CPU is exactly what this list is for. -->
+                    <div id="settings-facts" class="set-card"></div>
+                    <!-- Anything startup wants to say about what it opened.
+                         Plain `hidden` is safe here: `.set-section__note` sets
+                         a colour, not `display`. -->
+                    <p id="session-note" class="set-section__note" hidden></p>
+                  </div>
+
+                  <!-- The debug log. The notices list it replaces is gone;
+                       this is what its
+                       traffic became — everything Sotone does, including the
+                       lines that used to be dropped, in a strip at the bottom
+                       of the window. Off by default, because it is a
+                       debugging window and not a feature.
+
+                       Nothing about it is written to disk: it is a ring in
+                       this page's memory and it dies with the window
+                       (invariant 3 is untouched either way — nothing leaves
+                       the machine in either direction). The *switch* is a
+                       display preference and lives in localStorage beside
+                       `sotone.tree_collapsed` and `sotone.draft_sort`, never in
+                       the config file. -->
+                  <div class="set-section">
+                    <div class="set-section__label">Troubleshooting</div>
+                    <div class="set-card">
+                      <div class="set-row">
+                        <div class="set-row__main">
+                          <span class="set-row__label">Debug log</span>
+                          <span class="set-row__note">
+                            Shows a running list of what Sotone is doing along the
+                            bottom of the window — helper restarts and which
+                            inputs they hook, reconnects, model loads, skipped
+                            lines. Kept in memory only: nothing is written to
+                            disk and nothing is sent anywhere.
+                          </span>
+                        </div>
+                        <span class="set-row__control">
+                          <label class="toggle">
+                            <input id="debug-toggle" type="checkbox"
+                                   class="toggle__box"
+                                   aria-label="Show the debug log" />
+                            <span class="toggle__knob" aria-hidden="true"></span>
+                          </label>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- The external-edit stop is deliberately not a centered popup here:
+           the condition strip and the in-card diff above carry it instead,
+           because a permanent state deserves a surface that
+           stays rather than one that has to be dismissed before the window can
+           be used again. Nothing has been written in either version.
+
+           A save with no project to save into (notes exist only within
+           projects). Nothing was written. Same shape as the conflict stop
+           above and for the same reasons: in-page DOM, `position: fixed` so it
+           cannot open below the fold, `data-open` rather than
+           `hidden`, and never a native dialog — a real modal takes focus away
+           from whatever is being tested (invariant 2). -->
+      <section id="no-project" class="popup" data-open="no"
+               role="group" aria-labelledby="no-project-title">
+        <div class="popup__box">
+          <h2 id="no-project-title" class="popup__title">
+            This note needs a project
+          </h2>
+          <p class="muted">
+            Notes are saved inside a project's folder. Nothing has been written
+            yet — pick a project for this note, or make one.
+          </p>
+
+          <div id="no-project-pick" class="field">
+            <label class="field__label" for="no-project-select">Use</label>
+            <select id="no-project-select" class="field__input"></select>
+            <button id="no-project-use" type="button" class="linkish">
+              Save into it
+            </button>
+          </div>
+
+          <p class="muted popup__or">or make a new one:</p>
+          <div class="field">
+            <label class="field__label" for="no-project-name">Name</label>
+            <input id="no-project-name" class="field__input" type="text"
+                   placeholder="Project name" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="no-project-dir">Folder</label>
+            <input id="no-project-dir" class="field__input" type="text"
+                   placeholder="Pick a folder" spellcheck="false" />
+            <button id="no-project-browse" type="button" class="linkish">Browse…</button>
+          </div>
+          <!-- The same switch and the same echo as the New-project pane.
+               Two creation surfaces that disagree about what folder a
+               project gets is a defect, so the markup,
+               the wording and the composer are one grammar in two places. -->
+          <div class="field">
+            <span class="field__label" aria-hidden="true"></span>
+            <label class="toggle">
+              <input id="no-project-subfolder" type="checkbox"
+                     class="toggle__box" checked />
+              <span class="toggle__knob" aria-hidden="true"></span>
+            </label>
+            <label class="muted" for="no-project-subfolder">
+              Create a folder with the project name inside it
+            </label>
+          </div>
+          <div class="field">
+            <span class="field__label" aria-hidden="true"></span>
+            <span id="no-project-echo" class="field__preview"></span>
+          </div>
+
+          <div class="popup__actions">
+            <button id="no-project-create" type="button" class="linkish">
+              Create and save
+            </button>
+            <button id="no-project-cancel" type="button" class="linkish">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- The name clash a drop found. Dragging a note into another
+           project moves its `.md` into that project's folder, and a folder
+           that already holds a note of that name is the one case where the
+           drop stops and asks.
+
+           **Nothing has been written when this opens.** The drop is one atomic
+           intent: the backend resolved the paths, found the name taken, and
+           came back without touching a file, a binding or a project tag. Keep
+           both re-sends the same drop with the answer; Cancel sends nothing at
+           all. There is no third button, and there never will be — an
+           overwrite here would silently destroy somebody else's note
+           (invariant 4).
+
+           The same `.popup` grammar as the pick-or-create stop above — in-page
+           DOM, `position: fixed`, `data-open` rather than `hidden`, never a
+           native dialog (a real modal takes focus off whatever is being
+           tested, invariant 2) — on the design's glass, which is the menu
+           surface material (`--glass` + `--glass-blur` + `--glass-line`). -->
+      <section id="note-clash" class="popup" data-open="no"
+               role="group" aria-labelledby="note-clash-title">
+        <div class="popup__box popup__box--glass">
+          <h2 id="note-clash-title" class="popup__title">
+            There is already a note called that
+          </h2>
+          <p id="note-clash-detail" class="muted"></p>
+          <p id="note-clash-keeps" class="muted popup__or"></p>
+
+          <div class="popup__actions">
+            <button id="note-clash-keep" type="button" class="linkish">
+              Keep both
+            </button>
+            <button id="note-clash-cancel" type="button" class="linkish">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Where the selected lines should go. The selection
+           toolbar's "Move to note…" opens this; confirming sends one
+           `line_move_to` per line, in transcript order.
+
+           The list below is built by `main.js` from the last drafts payload
+           and always ends with one fixed **New note** option
+           (value `""`, never an id): the chooser can make its own destination,
+           which is why there is no "nowhere to move to" state and no empty
+           picker to retract.
+
+           The same `.popup` grammar as the two questions above — in-page DOM,
+           `position: fixed`, `data-open` rather than `hidden`, never a native
+           dialog (a real modal takes focus off whatever is being tested,
+           invariant 2) — on the design's glass, like the clash question it
+           sits next to.
+
+           **Escape cancels it.** Unlike the note clash, this is a picker the
+           user opened, not a question the backend came back with, so walking
+           away from it is a perfectly good answer and sends nothing. It also
+           leaves the selection alone: it acts on the set, so closing it
+           without answering must not destroy it. -->
+      <section id="move-note" class="popup" data-open="no"
+               role="group" aria-labelledby="move-note-title">
+        <div class="popup__box popup__box--glass">
+          <h2 id="move-note-title" class="popup__title">Move to note</h2>
+          <p id="move-note-detail" class="muted"></p>
+
+          <div class="field">
+            <label class="field__label" for="move-note-select">Note</label>
+            <select id="move-note-select" class="field__input"></select>
+          </div>
+
+          <p id="move-note-keeps" class="muted popup__or">
+            The lines' audio and edit history go with them. One Undo puts
+            them back in this note — the copies are not removed from the
+            note they moved to.
+          </p>
+
+          <div class="popup__actions">
+            <button id="move-note-go" type="button" class="linkish">
+              Move them
+            </button>
+            <button id="move-note-cancel" type="button" class="linkish">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- The debug log, where the notices list used to be. It is
+           not the notices list regrown: refusals and failures go to the pane
+           footer's message slot where they will be read, conditions go to a
+           strip that stays, and this is the opt-in window onto everything —
+           including the lines that no longer appear anywhere else.
+
+           Present in every phase, like the list it replaces, because a line
+           emitted during startup still has to land somewhere. Newest first,
+           mono, level-tagged, capped in memory. `data-open` from the Settings
+           toggle, never `hidden`. -->
+      <section id="debug-log" class="debuglog" data-open="no"
+               aria-label="Debug log">
+        <div class="debuglog__head">
+          <span class="debuglog__title">Debug log</span>
+          <span id="debug-count" class="debuglog__count"></span>
+        </div>
+        <ul id="debug-list" class="debuglog__list"></ul>
+      </section>
+
+      <!-- The context menu, and the one place in the app where the
+           design's drawn glass is actually built: the tray could not take it
+           (a notification-area flyout is drawn by the OS),
+           and an in-window menu can.
+
+           Empty markup on purpose — its items are built per row, because what
+           a note row offers and what a project row offers are two lists and
+           both depend on whether a recording is live. `position: fixed`, so it
+           is a child of the app rather than of the tree it opens over, and
+           `data-open` rather than `hidden` (the rule that shows it sets
+           `display`).
+
+           `tabindex="-1"` because it takes DOM focus when it opens so the
+           arrow keys reach it — focus inside a window that already has it,
+           never window activation (invariant 2). -->
+      <div id="row-menu" class="menu" role="menu" tabindex="-1" data-open="no"
+           aria-label="Row actions"></div>
+
+      <!-- Every dropdown's open list, and the second thing in this
+           window drawn in the design's glass. A native <select>'s popup is an
+           OS window drawn outside this page's cascade — it could never be
+           styled, and it could take activation. This div can be, and cannot.
+
+           One host for all nine controls, empty in the markup and filled from
+           the <select>'s own options each time it opens: what a list offers is
+           decided the moment it opens, exactly as the menu above decides what
+           a row offers. `position: fixed` and `data-open` for the same two
+           reasons that one gives.
+
+           No `tabindex`: DOM focus stays on the control that opened it — the
+           row the keyboard is on is *named* (`aria-activedescendant`), not
+           focused — so nothing here ever moves the caret out of the pane the
+           user is working in. The <select>s stay in the DOM, keep their ids,
+           and remain what every listener listens to. -->
+      <div id="drop-menu" class="drop" role="listbox" data-open="no"
+           aria-label="Options"></div>
+    </main>
+
+    <!-- The model guide, once. Both surfaces that have to explain
+         what a speech model is — the repair panel and the wizard's model
+         step — clone this at startup, so the recommendation table exists in
+         exactly one place. The numbers are verified
+         against the live Hugging Face file tree and whisper.cpp's README: do
+         not "improve" them from memory.
+
+         The Copy button is addressed by class rather than id, because there
+         are two of it on the page once this is cloned. It writes a constant
+         from main.js to the clipboard — there is no link here and no
+         URL-opening command anywhere in this window (invariant 3). -->
+    <template id="tmpl-model-guide">
+      <section class="settings">
+        <div class="settings__head">
+          <h2 class="settings__title">Which one</h2>
+          <span class="muted">bigger is more accurate and slower</span>
+        </div>
+        <table class="models-table">
+          <thead>
+            <tr>
+              <th scope="col">Model</th>
+              <th scope="col">File</th>
+              <th scope="col">Download</th>
+              <th scope="col">Needs free (rough)</th>
+              <th scope="col">Languages</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>tiny.en</td>
+              <td><code>ggml-tiny.en.bin</code></td>
+              <td>78 MB</td>
+              <td>~0.3 GB</td>
+              <td>English only</td>
+            </tr>
+            <tr>
+              <td>base.en</td>
+              <td><code>ggml-base.en.bin</code></td>
+              <td>148 MB</td>
+              <td>~0.4 GB</td>
+              <td>English only</td>
+            </tr>
+            <tr>
+              <td>small.en</td>
+              <td><code>ggml-small.en.bin</code></td>
+              <td>488 MB</td>
+              <td>~0.9 GB</td>
+              <td>English only</td>
+            </tr>
+            <tr>
+              <td>medium.en</td>
+              <td><code>ggml-medium.en.bin</code></td>
+              <td>1.5 GB</td>
+              <td>~2.1 GB</td>
+              <td>English only</td>
+            </tr>
+            <tr>
+              <td>large-v3-turbo</td>
+              <td><code>ggml-large-v3-turbo.bin</code></td>
+              <td>1.6 GB</td>
+              <td>~2.5 GB</td>
+              <td>all</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          Drop the <code>.en</code> for the multilingual version of any of
+          them (<code>ggml-small.bin</code>). The quantized files — the ones
+          with <code>-q5_0</code> or <code>-q8_0</code> in the name — are
+          about half the size and work here too.
+        </p>
+        <p class="muted">
+          The memory column is rough on purpose. whisper.cpp publishes one
+          general figure rather than a VRAM requirement, so read it as
+          roughly that much free memory on your GPU or your CPU, not as an
+          official minimum.
+        </p>
+      </section>
+
+      <section class="settings">
+        <div class="settings__head">
+          <h2 class="settings__title">Where to get one</h2>
+        </div>
+        <div class="field">
+          <code class="model-url empty__url">https://huggingface.co/ggerganov/whisper.cpp</code>
+          <button type="button" class="linkish model-url__copy">copy</button>
+        </div>
+        <p class="muted">
+          Not a link, on purpose: Sotone opens no browser and makes no network
+          request of its own. Copy the address into your own browser, take
+          the <code>.bin</code> you want, and put it in your models folder —
+          the button below opens it.
+        </p>
+      </section>
+    </template>
+  </body>
+</html>

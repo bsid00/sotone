@@ -1,0 +1,11 @@
+# Line-ending pins for files whose consumers care about the exact bytes.
+#
+# The sh sidecar script runs under bash on Linux/macOS CI runners; a CRLF
+# working copy (which core.autocrlf=true would produce on a Windows clone)
+# breaks bash with stray `\r`s if the file ever travels by any route other
+# than a git checkout on the runner itself. Pinned LF everywhere.
+*.sh text eol=lf
+
+# PowerShell is CR-tolerant both ways; workflows/YAML/Rust are fine under
+# git's default text handling. Only the genuinely byte-sensitive case is
+# pinned — a broad rewrite of the repo's eol handling is not this file's job.

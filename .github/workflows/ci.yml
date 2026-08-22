@@ -1,0 +1,286 @@
+# Sotone CI.
+#
+# Nothing here has ever run: at the time of writing this repo has no git remote,
+# so the first Actions run is still ahead. Every step that CAN run locally is
+# the exact command that already runs locally (the project's own verification
+# commands, verbatim); the rest is conservative and says where it came from.
+#
+# Why hosted runners can run the whole test suite: Sotone's tests need no audio
+# device, no GPU, no model file and no window. That is the repo's own test policy
+# (pure-logic tests only; device-dependent checks live in
+# examples/harnesses, not in `cargo test`), and it is the reason the required set
+# below can be this broad.
+#
+# Runner images are PINNED, not `-latest`. 2026 is mid-migration:
+# `windows-latest` is moving to Windows Server 2025 + VS2026 and `macos-latest`
+# to macOS 26. `windows-2022` is the image that matches the VS2022 Build Tools
+# toolchain this project is developed and verified against.
+#
+# Actions are pinned by tag, not by commit SHA. SHA-pinning is a future hardening
+# pass — worth doing, not done here.
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Formatting compiles nothing, so this job carries no cache. `--all` covers
+      # the three workspace members; `vendor/rdev` is workspace-excluded on
+      # purpose (upstream style is not held to ours — see the root Cargo.toml).
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+  windows:
+    name: windows / vulkan
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      # The Visual Studio generator cannot configure ggml's nested
+      # `vulkan-shaders-gen` ("No CMAKE_C_COMPILER could be found"); Ninja can.
+      # Both CMake and Ninja are preinstalled on the image. This is a known
+      # trap, and it is a property of ggml's build, not of one machine.
+      CMAKE_GENERATOR: Ninja
+    steps:
+      # The local build redirects the cargo target dir out of the tree because
+      # whisper.cpp's nested Vulkan build blows past MAX_PATH from a developer's
+      # workspace. That redirect lives in a gitignored `.cargo/config.toml` and
+      # deliberately does not travel: runner workspaces are short (`D:\a\...`),
+      # so the default `target/` is fine here. Symptom if it ever is not:
+      # `cl.exe` failing with C1041.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # `cl.exe` is not on PATH on the Windows images; this puts a developer
+      # command prompt's environment into the job. The action is stale (no
+      # release in years) but is still the standard way to do this and nothing
+      # in the catalogue has replaced it.
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Build-time only: the vulkan backend needs headers, the loader import
+      # library and the shader toolchain. `vulkan-shaders-gen` is a host-side
+      # CMake tool — no GPU is involved, which is why a headless runner can
+      # compile a GPU backend it can never execute.
+      #
+      # Why the official LunarG SDK and not a from-source component action
+      # (humbletim/setup-vulkan-sdk and friends): ggml's Vulkan backend hard-
+      # requires *glslc*. Read off whisper-rs-sys's vendored whisper.cpp,
+      # `ggml/src/ggml-vulkan/CMakeLists.txt` line 9 is
+      #     find_package(Vulkan COMPONENTS glslc REQUIRED)
+      # and glslc comes from the shaderc project — Glslang ships
+      # glslangValidator, which is a different binary. A
+      # headers+loader+Glslang+SPIRV-Tools component set therefore dies at CMake
+      # configure time, and this is a required job. The LunarG SDK carries
+      # glslc.exe in Bin\. 1.4.350.0 is the SDK version this project is
+      # built against; the download URL was verified 2026-08-16 (HTTP 200,
+      # ~309 MB). What is still unobserved here: how the silent installer
+      # behaves on a hosted runner. The flags below are LunarG's documented
+      # unattended ones and are widely used in public CI, but no run of this
+      # repo has ever exercised them — hence the explicit glslc.exe check.
+      - name: Cache the Vulkan SDK installer
+        uses: actions/cache@v4
+        with:
+          # The downloaded installer only, never the installed SDK: a full
+          # install is GB-scale and the repo-wide cache cap is 10 GB.
+          path: ${{ runner.temp }}\vulkansdk-windows-X64-1.4.350.0.exe
+          key: vulkan-sdk-installer-1.4.350.0
+
+      - name: Install the Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\vulkansdk-windows-X64-1.4.350.0.exe"
+          if (-not (Test-Path -LiteralPath $installer)) {
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://sdk.lunarg.com/sdk/download/1.4.350.0/windows/vulkansdk-windows-X64-1.4.350.0.exe' -OutFile $installer
+          }
+          # The install itself runs every time (minutes, deterministic); only
+          # the download is cached.
+          Start-Process -FilePath $installer -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install','--root','C:\VulkanSDK\1.4.350.0' -Wait
+          $glslc = 'C:\VulkanSDK\1.4.350.0\Bin\glslc.exe'
+          if (-not (Test-Path -LiteralPath $glslc)) {
+            Write-Host "::error::$glslc is missing after the silent install -- ggml's find_package(Vulkan COMPONENTS glslc REQUIRED) cannot succeed, so stop here rather than failing opaquely inside whisper-rs-sys"
+            exit 1
+          }
+          "VULKAN_SDK=C:\VulkanSDK\1.4.350.0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "C:\VulkanSDK\1.4.350.0\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Distinct cache key from the Linux/macOS jobs on purpose: whisper.cpp's
+      # object files are large and the repo-wide cache cap is 10 GB, so the
+      # platforms must not evict each other.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-vulkan
+
+      # MUST precede any src-tauri build or test. With `bundle.externalBin` set,
+      # tauri-build fails with "resource path ... doesn't exist" unless
+      # `src-tauri/binaries/sotone-hook-<triple>.exe` is already staged — so this
+      # is a prerequisite of `cargo test`, not just of bundling.
+      - name: Stage the hook sidecar
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/bundle/prepare_sidecar.ps1
+
+      # The next three are the project's canonical verification commands,
+      # verbatim. Do not "improve" them: they are what the developer loop runs,
+      # and CI disagreeing with that loop is worse than CI being narrow.
+      - name: cargo clippy --features vulkan -- -D warnings
+        run: cargo clippy --features vulkan -- -D warnings
+
+      - name: cargo clippy --all-targets --features vulkan -- -D warnings
+        run: cargo clippy --all-targets --features vulkan -- -D warnings
+
+      - name: cargo test --features vulkan
+        run: cargo test --features vulkan
+
+  linux:
+    name: linux / cpu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # whisper-rs-sys's build script refuses to configure its `openblas`
+      # feature unless this is set, and it panics before ggml's own pkg-config
+      # lookup ever runs. This is where Ubuntu 24.04's libopenblas-dev (through
+      # libopenblas-pthread-dev) installs cblas.h, checked against the package
+      # file list. Seen on the first real run of this workflow.
+      BLAS_INCLUDE_DIRS: /usr/include/x86_64-linux-gnu/openblas-pthread
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Four groups in one install:
+      #   * Tauri v2's own Linux prerequisites (webkit2gtk 4.1, gtk3, xdo,
+      #     appindicator, rsvg, ssl, the build-essential/curl/wget/file set).
+      #   * libasound2-dev — cpal's ALSA backend.
+      #   * libx11/libxtst/libxi — the vendored rdev's x11 crate (xlib, xrecord,
+      #     xinput). These are what make the Linux hook sources compile at all.
+      #   * libopenblas-dev — whisper-rs's `openblas` feature, which the `cpu`
+      #     backend selects. OpenMP needs no package: GCC ships libgomp.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            pkg-config \
+            libasound2-dev \
+            libx11-dev \
+            libxtst-dev \
+            libxi-dev \
+            libopenblas-dev
+
+      - name: Install stable Rust with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-cpu
+
+      - name: cargo test -p sotone-core --features cpu
+        run: cargo test -p sotone-core --features cpu
+
+      # This is the vendored rdev's Linux compile verification: sotone-hook is
+      # the only crate that exists purely to run the hook, and building it pulls
+      # `vendor/rdev`'s x11 sources — vendored here and never compiled on
+      # this platform until now.
+      - name: cargo check -p sotone-hook (vendored rdev, Linux sources)
+        run: cargo check -p sotone-hook
+
+      # The three steps below started life as "experimental", allowed to fail
+      # because the app crate had never been compiled on Linux. They passed on
+      # the first real run (2026-08-22) and were promoted to required the same
+      # day: a step that is permitted to fail is a step nobody reads. What they
+      # guarantee is "still compiles and lints on Linux", nothing about runtime.
+      - name: Stage the hook sidecar
+        run: bash tools/bundle/prepare_sidecar.sh
+
+      - name: cargo check -p sotone --features cpu
+        run: cargo check -p sotone --features cpu
+
+      - name: cargo clippy -p sotone-core --features cpu -- -D warnings
+        run: cargo clippy -p sotone-core --features cpu -- -D warnings
+
+  macos:
+    name: macos / metal
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-metal
+
+      # Diagnostic, not a gate. whisper-rs's `coreml` feature (which the `metal`
+      # backend selects) invokes `coremlc`, which has historically required full
+      # Xcode rather than the bare command line tools. The macOS images ship
+      # full Xcode, so this is believed fine — but if the metal build dies with
+      # something opaque, this line is the first place to look.
+      - name: "diagnostic: xcrun --find coremlc"
+        continue-on-error: true
+        run: xcrun --find coremlc
+
+      - name: cargo test -p sotone-core --features metal
+        run: cargo test -p sotone-core --features metal
+
+      # As on Linux: building the hook is what compiles the vendored rdev's
+      # macOS sources (Quartz event taps), vendored here and never built
+      # on this platform until now.
+      - name: cargo check -p sotone-hook (vendored rdev, macOS sources)
+        run: cargo check -p sotone-hook
+
+      # Same story as the Linux block: experimental until the first real run
+      # showed them green (2026-08-22), required since.
+      - name: Stage the hook sidecar
+        run: bash tools/bundle/prepare_sidecar.sh
+
+      - name: cargo check -p sotone --features metal
+        run: cargo check -p sotone --features metal
+
+      - name: cargo clippy -p sotone-core --features metal -- -D warnings
+        run: cargo clippy -p sotone-core --features metal -- -D warnings

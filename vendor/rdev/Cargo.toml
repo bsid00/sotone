@@ -1,0 +1,45 @@
+# Vendored fork of rdev 0.5.3 (MIT, Nicolas Patry). See README-SOTONE.md for the
+# diff against upstream and why it exists. Name and version are kept so the
+# workspace's `rdev = "=0.5.3"` pin plus `[patch.crates-io]` resolves here.
+#
+# Removed relative to upstream's manifest: the `unstable_grab` feature and its
+# Linux-only deps (evdev-rs / epoll / inotify) — grab is event *interception*,
+# which invariant 1 forbids — and the examples/tests entries, since neither is
+# vendored.
+[package]
+name = "rdev"
+version = "0.5.3"
+edition = "2018"
+authors = ["Nicolas Patry <patry.nicolas@protonmail.com>"]
+description = "Listen to keyboard and mouse events on Windows, Linux and MacOS. Vendored and stripped for Sotone."
+homepage = "https://github.com/Narsil/rdev"
+documentation = "https://docs.rs/rdev/"
+license = "MIT"
+repository = "https://github.com/Narsil/rdev"
+publish = false
+
+[features]
+serialize = ["serde"]
+
+[dependencies]
+lazy_static = "1.4"
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[target."cfg(target_os = \"linux\")".dependencies]
+libc = "0.2"
+x11 = { version = "2.18", features = ["xlib", "xrecord", "xinput"] }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+cocoa = "0.22"
+core-foundation = "0.7"
+core-foundation-sys = "0.7"
+core-graphics = { version = "0.19.0", features = ["highsierra"] }
+
+# `libloaderapi` added 2026-08-16 (patch 4): the raw-input sink window needs
+# `GetModuleHandleW` for the module handle it registers its class against.
+# Everything else the raw-input path uses — `RegisterRawInputDevices`,
+# `GetRawInputData`, the `RAWINPUT*` structs, the `RIDEV_*`/`RI_*` constants,
+# `CreateWindowExW`, `GetMessageW`, `DefWindowProcW`, `HWND_MESSAGE` — is
+# already under `winuser`. No new crate.
+[target."cfg(target_os = \"windows\")".dependencies]
+winapi = { version = "0.3", features = ["winuser", "errhandlingapi", "processthreadsapi", "libloaderapi"] }

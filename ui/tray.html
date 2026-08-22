@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" data-platform="windows">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sotone tray menu</title>
+    <!-- Same rules as overlay.html: every resource local and same-origin, no
+         CDN, no webfont (invariant 3); the script is external because
+         'unsafe-inline' is not on the CSP. Tokens first, then the sheet that
+         is nothing but var(--…) — the palette does not exist in the other
+         order. Cache-busters are per file. -->
+    <link rel="stylesheet" href="tokens.css?v=044" />
+    <link rel="stylesheet" href="tray.css?v=044" />
+    <script src="tray.js?v=044a" defer></script>
+  </head>
+  <!-- The window is transparent (alpha 0 or 255 on Windows, never between),
+       so the menu's 72% glass is the CSS `--glass` fill painted over nothing,
+       exactly as the pill does it. Everything inside is rendered by tray.js
+       from the one `Vec<TrayItem>` the tray thread derives — this file is a
+       socket, not a copy of the menu. -->
+  <body>
+    <div id="menu" class="traymenu" role="menu" aria-label="Sotone"></div>
+  </body>
+</html>

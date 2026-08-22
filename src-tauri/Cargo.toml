@@ -1,0 +1,83 @@
+[package]
+name = "sotone"
+description = "Hands-free dictation logger for human runtime testing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+sotone-core = { path = "../crates/sotone-core" }
+# `tray-icon` is the one new crate this app has taken in a while, and it is the
+# tray: a feature on the dependency we already have, which pulls
+# `tray-icon` 0.24 behind Tauri's own wrapper. It is what makes "window closed,
+# still capturing" a real mode — the one people play in — and it is the only
+# surface Sotone has while the window is hidden.
+#
+# `muda` (the menu half) is already an unconditional Tauri dependency, so the
+# menu costs nothing new. No `image-png` / `image-ico`: the glyph is painted in
+# `src/tray.rs` into a raw RGBA buffer and handed to `CreateIcon`, so there is
+# no decoder, no `.ico`, and no image crate in the tree.
+tauri = { workspace = true, features = ["tray-icon"] }
+# The native folder picker. A folder cannot be chosen in-page: the
+# webview has no filesystem access, and there is no way to enumerate a drive
+# from JavaScript under our CSP. Official tauri-apps plugin, Rust side only —
+# no npm half, and no network code path.
+tauri-plugin-dialog = "2"
+# "Reveal in file manager". Chosen over shelling out to
+# `explorer /select,` because explorer's argument quoting is finicky and its
+# exit code is meaningless even on success; the plugin wraps the correct
+# platform mechanism. Opens a local path in the OS file manager — nothing
+# leaves the machine (invariant 3).
+tauri-plugin-opener = "2"
+# "Sotone runs once". Two live Sotones are not a
+# harmless duplicate: Raw Input broadcasts, so both copies record every press,
+# and both append to the same draft store — the corruption race invariant 4
+# exists to forbid. Official tauri-apps plugin. On Windows it is a named mutex
+# keyed on the bundle identifier plus a hidden message-only window: the second
+# process sends one local `WM_COPYDATA` and exits during plugin setup. Purely
+# local Win32 IPC — nothing leaves the machine (invariant 3), and a private
+# window message is not keyboard or mouse synthesis (invariant 1).
+tauri-plugin-single-instance = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+# Event payloads and command returns must implement `Serialize`. Already in the
+# tree via sotone-core's draft store, so this adds no new crate.
+serde = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# One extended-style word on the overlay window. Tauri cannot express
+# `WS_EX_TOOLWINDOW`: `skipTaskbar` only calls `ITaskbarList::DeleteTab`, and an
+# unowned window keeps `WS_EX_APPWINDOW`, which is what holds it in Alt-Tab
+# (tauri-apps/tauri#10422). Already in the tree via tauri/tao, so this adds no
+# crate to the build.
+#
+# The two features named here carry window styles and window metadata only, and
+# input synthesis is not among them: SendInput, keybd_event and mouse_event live
+# in `Win32_UI_Input_KeyboardAndMouse`, which Sotone does not ask for.
+#
+# Being exact, because invariant 1 deserves it: that module is nevertheless in
+# the build already — `muda`, Tauri's own menu crate, enables it, and has since
+# before this dependency existed. Cargo unifies features, so declaring
+# windows-sys here neither adds nor removes it. What holds invariant 1 is that
+# no call site exists anywhere in this repository — `grep -r SendInput` over
+# src-tauri/ and crates/ finds only comments — exactly as it did before.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+# Pass-through only. "More than one backend" is rejected in sotone-core, next to
+# the features themselves; "no backend at all" is rejected in this crate's
+# main.rs, because a backend-free sotone-core is a legitimate build (it is
+# what sotone-hook.exe links) and only the binary that loads a model can insist
+# on one.
+vulkan = ["sotone-core/vulkan"]
+cpu = ["sotone-core/cpu"]
+metal = ["sotone-core/metal"]

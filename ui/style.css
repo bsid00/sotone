@@ -1,0 +1,4793 @@
+/* Sotone's window. System fonts only: no webfont means no network request
+   (invariant 3), and the CSP in tauri.conf.json would refuse one anyway.
+
+   **Every colour in this file comes from `tokens.css`**, which is
+   the design's token sheet verbatim plus the per-platform radius and font
+   overrides. There is not a single hex literal below, and there must never be
+   one again: the two palettes define the same token names, so nothing here
+   branches on theme — `data-theme="light"` on <html> swaps every value at once
+   and this sheet does not know it happened.
+
+   The rules that outlive the palette: no blue anywhere (every hex in
+   `tokens.css` keeps red >= blue, which a grep checks), red is the one colour
+   and it means a live recording or a line that failed, and everything else
+   separates by brightness, weight and a hairline. */
+
+* {
+  box-sizing: border-box;
+}
+
+/* Ink centring: every boxed control's padding pair subtracts
+   `--ink-up-125`/`--ink-up-13` above and adds it below, lifting the glyph ink
+   to the optical centre without moving any border-box height. The tokens and
+   their full measurement story live in tokens.css, because the tray menu page
+   needs the same lift. */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* The window is the frame: the title bar, the tree and the transcript each own
+     their scrolling, so the page itself never scrolls. */
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  /* The stack is a token because it is per-platform (Segoe UI Variable Text on
+     Windows, Adwaita Sans on GNOME, -apple-system on macOS). */
+  font: 14px/1.5 var(--sans);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Motion                                                                    */
+/*                                                                           */
+/* "Nothing in this app changes state instantly." Two shared rules carry most */
+/* of it: hover/press/focus is 120ms on background, border and colour         */
+/* together, and anything that appears or leaves is 180ms with a 4–6px move   */
+/* in its direction of travel. Nothing here exceeds 300ms and nothing         */
+/* bounces. Later, per-surface polish refines it; this is the base every      */
+/* control already on screen inherits.                                       */
+/* ------------------------------------------------------------------------- */
+
+button,
+select,
+input,
+.linkish,
+.action,
+.note__open,
+.group__toggle,
+.line__tool,
+.sidebar__settings {
+  transition: background-color 120ms ease-out, border-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+/* The four-bar logo, drawn as CSS rectangles: 2px wide, 2px gap, heights
+   5/10/7/4, the design's own proportions. It is the wordmark's glyph and the
+   recording indicator's, so it lives here once. `currentColor` lets the
+   indicator's three states colour it without a second rule. */
+.glyph,
+.rec__bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 11px;
+  flex: none;
+}
+
+.glyph i,
+.rec__bars i {
+  width: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.glyph i:nth-child(1),
+.rec__bars i:nth-child(1) {
+  height: 5px;
+}
+
+.glyph i:nth-child(2),
+.rec__bars i:nth-child(2) {
+  height: 10px;
+}
+
+.glyph i:nth-child(3),
+.rec__bars i:nth-child(3) {
+  height: 7px;
+}
+
+.glyph i:nth-child(4),
+.rec__bars i:nth-child(4) {
+  height: 4px;
+}
+
+/* Appearing and leaving. The popups and the panels below are shown by
+   switching `display`, which no transition can animate across — so it is a
+   keyframe on the box that appears, not a transition on the layer. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* The same beat over 4px: the design gives a tab switch a crossfade with a 4px
+   rise, and the settings rows that appear inside one follow it. */
+@keyframes rise-tab {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* The same beat with the movement taken out, for reduced motion. */
+@keyframes appear {
+  from {
+    opacity: 0;
+  }
+}
+
+.popup[data-open="yes"] .popup__box,
+.set-row--ask[data-open="yes"] {
+  animation: rise 180ms ease-out;
+}
+
+/* One tab's contents. The animation lives here rather than beside the rules
+   that swap `display`, so the reduced-motion override below can beat it on
+   equal specificity — the same arrangement every other appearance in this
+   sheet uses. An element going from `display: none` to shown restarts its
+   animation, which is exactly the tab switch. */
+.settings-tab {
+  animation: rise-tab 180ms ease-out;
+}
+
+/* The scrim behind a popup is a fade only: it has nowhere to travel from. */
+.popup[data-open="yes"] {
+  animation: appear 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The design's rule: keep every opacity crossfade at the
+     same duration, drop the movement and the scale. */
+  .popup[data-open="yes"] .popup__box,
+  .set-row--ask[data-open="yes"],
+  .settings-tab {
+    animation-name: appear;
+  }
+
+  /* The startup spinner is the one continuous indicator in this window, and a
+     frozen ring reads as a hung app — so it keeps indicating, in opacity
+     rather than in rotation. */
+  .spinner {
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The window's own title bar                                                */
+/*                                                                           */
+/* `decorations: false` in tauri.conf.json, so this strip *is* the caption on */
+/* all three platforms — the design draws custom chrome everywhere. It is     */
+/* grayscale on all three, traffic lights included, because red is reserved   */
+/* for a live recording.                                                     */
+/*                                                                           */
+/* `data-tauri-drag-region` sits on the bar element and never on a child:     */
+/* the bare form only starts a drag when the event target itself carries the  */
+/* attribute, so a caption button can never begin one. Double-click on the    */
+/* bar toggles maximize through the same script.                             */
+/*                                                                           */
+/* Nothing here can activate, show or focus a window: the three buttons call  */
+/* minimize / toggleMaximize / close and the capability file grants nothing   */
+/* else (invariant 2).                                                       */
+/* ------------------------------------------------------------------------- */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  /* The design's title-bar padding: 9px 14px on macOS and Windows, 12px 14px
+     on GNOME (below). */
+  padding: 9px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  /* The bar is the drag handle; text selection in it would fight the drag. */
+  user-select: none;
+}
+
+[data-platform="linux"] .titlebar {
+  padding: 12px 14px;
+}
+
+/* The glyph and the wordmark travel together, 6px apart, as every canvas
+   draws them. Pointer events would make them a non-drag hole in the bar. */
+.titlebar__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+.titlebar__wordmark {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  color: var(--text);
+}
+
+/* What the control thread is saying, and only while it is worth saying
+   something: in the ready phase the readouts to the right are the honest
+   status. A `display` rule keyed off a data attribute, never the `hidden`
+   attribute. */
+.titlebar__detail {
+  margin: 0;
+  min-width: 0;
+  font: 11.5px var(--mono);
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.titlebar[data-phase="ready"] .titlebar__detail,
+.titlebar[data-onboarding="yes"] .titlebar__detail {
+  display: none;
+}
+
+
+/* Indicator and hotkey hint. They describe a session, so they are absent until
+   there is one. */
+.titlebar__session {
+  display: none;
+}
+
+.titlebar[data-phase="ready"] .titlebar__session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* Enabled/Disabled sits beside the wordmark by design: it is the
+   one control on this bar, and the group at the right is a group of readouts.
+   The phase gate is the session group's, for the same reason — the button
+   describes a session, so it says nothing while Sotone is starting, has no model
+   or has failed. `display` keyed off the data attribute, never the `hidden`
+   attribute, which an author display rule silently beats.
+
+   It appears in DOM order between the brand and `#status-detail`, so the macOS
+   caption's `order: -1` moves the traffic lights in front of all three without
+   this needing an order of its own. */
+.titlebar .arm__toggle {
+  display: none;
+}
+
+.titlebar[data-phase="ready"] .arm__toggle {
+  display: block;
+}
+
+/* The wizard's title bar is the wordmark and the caption buttons and nothing
+   else: a first run on a machine that already has a model
+   launches `ready`, and without this it would show the Enabled button and the
+   recording indicator over a screen that has not asked about recording yet.
+   After the two phase rules above, at equal specificity, so it wins — and it is
+   `display`, never the `hidden` attribute. */
+.titlebar[data-onboarding="yes"] .titlebar__session,
+.titlebar[data-onboarding="yes"] .arm__toggle {
+  display: none;
+}
+
+/* Maximize while the window cannot be resized. Windows 11 greys the item
+   rather than hiding it, and so do we: a caption button that vanishes for one
+   screen is more startling than one that is plainly unavailable — and a menu
+   that lies is worse than either. */
+.caption:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.caption:disabled:hover {
+  background: none;
+}
+
+/* Every surface that reports capture state also shows the key that changes
+   it. Mono, because it is a key. */
+.titlebar__keys {
+  font: 11.5px var(--mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Windows and GNOME put the controls at the right; macOS at the left, which
+   is the one `order` below. */
+.titlebar__controls {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex: none;
+}
+
+/* Windows 11: 42px wide, full caption height, flush to the window edge — the
+   negative margins cancel the bar's own padding. Hover is `--sel`,
+   transparent otherwise, and **close is not red**. */
+[data-platform="windows"] .titlebar__controls {
+  align-self: stretch;
+  align-items: stretch;
+  margin: -9px -14px -9px auto;
+}
+
+.caption {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex: none;
+  width: 42px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: default;
+}
+
+.caption:hover {
+  background: var(--sel);
+}
+
+/* GNOME client-side decorations: three 24px round buttons on `--sel`,
+   `--panel-high` on hover, 8px apart. */
+[data-platform="linux"] .titlebar__controls {
+  gap: 8px;
+}
+
+[data-platform="linux"] .caption {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--sel);
+}
+
+[data-platform="linux"] .caption:hover {
+  background: var(--panel-high);
+}
+
+/* macOS: three 11px circles at `--line-strong`, 8px apart, at the *left* of
+   the bar. The glyphs are not drawn — the circles are the control (follow the
+   design's own canvas) — and the order is close first. */
+[data-platform="macos"] .titlebar__controls {
+  order: -1;
+  gap: 8px;
+  margin-left: 0;
+  margin-right: 6px;
+}
+
+[data-platform="macos"] .caption {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+[data-platform="macos"] .caption:hover {
+  background: var(--line-strong);
+  opacity: 0.75;
+}
+
+[data-platform="macos"] .caption--close {
+  order: -1;
+}
+
+/* The glyphs. Bars and a square rather than an icon font: no webfont is ever
+   asked for (invariant 3), and these are the design's exact pixel sizes. All
+   of them are `--muted`, on every platform. */
+.caption__min {
+  width: 10px;
+  height: 1px;
+  background: var(--muted);
+}
+
+.caption__max {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--muted);
+}
+
+/* GNOME draws its bar and square a shade smaller, the square softened. */
+[data-platform="linux"] .caption__min {
+  width: 9px;
+}
+
+[data-platform="linux"] .caption__max {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+}
+
+/* Restore: the same square with the corner of a second one behind it, shown
+   only while the window really is maximized, so the button never lies about
+   what it is about to do. Tracked from `isMaximized()` plus `onResized`. */
+.caption__restore {
+  display: none;
+  position: relative;
+  width: 9px;
+  height: 9px;
+  margin: 2px -2px 0 0;
+  border: 1px solid var(--muted);
+}
+
+.caption__restore::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: -1px;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--muted);
+  border-bottom: 0;
+  border-left: 0;
+}
+
+.titlebar[data-maximized="yes"] .caption__max {
+  display: none;
+}
+
+.titlebar[data-maximized="yes"] .caption__restore {
+  display: block;
+}
+
+/* Two rotated bars, centred on the button rather than laid out in it, so the
+   cross is exactly the design's 11px each way. */
+.caption__close-a,
+.caption__close-b {
+  position: absolute;
+  width: 11px;
+  height: 1px;
+  background: var(--muted);
+}
+
+[data-platform="linux"] .caption__close-a,
+[data-platform="linux"] .caption__close-b {
+  width: 10px;
+}
+
+.caption__close-a {
+  transform: rotate(45deg);
+}
+
+.caption__close-b {
+  transform: rotate(-45deg);
+}
+
+/* The traffic lights carry no glyph at all — the circle *is* the control.
+   Last in this block, and one class more specific than the restore rule
+   above, so a maximized macOS window does not sprout a glyph inside a
+   circle. */
+[data-platform="macos"] .titlebar .caption > * {
+  display: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The recording indicator and the arm control                               */
+/*                                                                           */
+/* One element, three states, and it is the only red in the window. It never  */
+/* snaps: the colour crosses over 160ms (the design's motion table), which    */
+/* is why the three states differ only in `color` and in whether the bars     */
+/* are running.                                                              */
+/* ------------------------------------------------------------------------- */
+
+.rec {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  /* Armed and idle: the palette's tertiary gray. Red would say "listening". */
+  color: var(--dim);
+  transition: color 160ms ease-out;
+}
+
+/* Disarmed is the quietest thing on the bar — nothing is going to happen. */
+.rec[data-state="disarmed"] {
+  color: var(--faint);
+}
+
+.rec[data-state="recording"] {
+  color: var(--live);
+}
+
+/* The indicator's bars *are* the logo's — same four rectangles, same 5/10/7/4
+   — and they are the only continuous animation in the app. Four durations and
+   two delays, from the canvas, so the bars never move as one block.
+   `animation-play-state: paused` at rest rather than no animation at all, so
+   they hold their shape and start from where they stood. */
+.rec__bars i {
+  transform-origin: center;
+  animation: vu 560ms ease-in-out infinite alternate;
+  animation-play-state: paused;
+}
+
+.rec__bars i:nth-child(1) {
+  animation-duration: 480ms;
+}
+
+.rec__bars i:nth-child(2) {
+  animation-duration: 700ms;
+  animation-delay: 90ms;
+}
+
+.rec__bars i:nth-child(3) {
+  animation-duration: 560ms;
+  animation-delay: 220ms;
+}
+
+.rec__bars i:nth-child(4) {
+  animation-duration: 620ms;
+  animation-delay: 40ms;
+}
+
+.rec[data-state="recording"] .rec__bars i {
+  animation-play-state: running;
+}
+
+/* CSS only, deliberately: a rAF loop in this window would be one more thing
+   competing with the capture thread for the machine while a game is running.
+   Nothing here touches the input hook (invariant 5). */
+@keyframes vu {
+  0% {
+    transform: scaleY(0.26);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+/* Mono: it is a clock. */
+.rec__label {
+  font: 12px var(--mono);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The safety, drawn as a control: filled while armed, a quiet outline while
+   disarmed. Never red — there is no record button here to confuse it with. */
+.arm__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* The one centering rule plus the measured ink term: flex
+     centres the line box, the token lifts the ink to the optical centre. The
+     base pair is symmetric — see the token block at the top of this file. */
+  padding: calc(4px - var(--ink-up-125)) 13px calc(4px + var(--ink-up-125));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--panel-high);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.arm__toggle[data-armed="no"] {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--dim);
+}
+
+.arm__toggle:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+.arm__toggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The bars are movement, not information — the colour and the label carry
+     the state on their own. */
+  .rec__bars i {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The four top-level views                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* The `hidden` trap, restated where it bites: these four views are shown and
+   hidden with the `hidden` attribute, and the rules below set `display` — an
+   author display rule beats the UA sheet's `[hidden] { display: none }`, so
+   without this line every view would be permanently visible. Any new view
+   here needs the same treatment or a data attribute instead. */
+#view-loading[hidden],
+#view-fatal[hidden],
+#view-empty[hidden],
+#view-onboarding[hidden],
+#view-ready[hidden] {
+  display: none;
+}
+
+.view {
+  flex: 1;
+  min-height: 0;
+}
+
+#view-loading,
+#view-fatal {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.panel__lead {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.panel--fatal {
+  border-color: var(--bad);
+}
+
+.fatal__message {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+  color: var(--bad);
+}
+
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border: 2px solid var(--dim);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The session: sidebar tree + main area                                    */
+/* ------------------------------------------------------------------------- */
+
+#view-ready {
+  display: flex;
+  min-width: 0;
+}
+
+/* Sidebar and pane, side by side under the title bar. Both on `--panel`; the
+   one hairline between them belongs to the pane (below), so it runs unbroken
+   from the title bar's bottom edge to the foot of the window. */
+.shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--panel);
+}
+
+/* Notes or settings — one shell on screen at a time. `display`,
+   because the two are alternatives and not layers, which also means the notes
+   shell keeps every bit of its state while it is off screen: the tree's
+   collapse marks, the selected row and whichever pane was open are all still
+   in the DOM, untouched, when it comes back.
+
+   A crossfade with no movement: a 4–6px rise on a body-sized swap would shove
+   the whole window, and the design's rise belongs to the things that appear
+   *inside* one (the design's motion table). */
+#view-ready[data-view="notes"] #shell-settings,
+#view-ready[data-view="settings"] #shell-notes {
+  display: none;
+}
+
+#view-ready[data-view="notes"] #shell-notes,
+#view-ready[data-view="settings"] #shell-settings {
+  animation: appear 180ms ease-out;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  /* Fixed by the design: the pane takes every pixel a resize adds. */
+  width: 236px;
+  min-height: 0;
+  background: var(--panel);
+}
+
+/* 49px, exactly the pane header's height, so the two hairlines line up across
+   the window. It holds the sort control and the search field. */
+.sidebar__top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  height: 49px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The sort control, drawn as the design's small box: `--bg` on a hairline,
+   with the three descending rules as its glyph. The <select> inside is native
+   and invisible, and inert as well: the list is `#drop-menu`. */
+.sort {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 9px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.sort:hover {
+  background: var(--sel);
+}
+
+.sort:focus-within {
+  border-color: var(--dim);
+}
+
+.sort__icon {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2.5px;
+  flex: none;
+}
+
+.sort__icon i {
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--dim);
+}
+
+.sort__icon i:nth-child(1) {
+  width: 11px;
+}
+
+.sort__icon i:nth-child(2) {
+  width: 8px;
+}
+
+.sort__icon i:nth-child(3) {
+  width: 5px;
+}
+
+.sort__select {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  /* Same double-border as `.pick__select`: the UA ring paints inside
+     the `.sort` box. Safe to suppress only because `.sort:focus-within` above
+     is the visible focus state. */
+  outline: none;
+}
+
+.sort:hover .sort__select {
+  color: var(--text);
+}
+
+/* Kept as the fallback it now is: the OS list this was written for can
+   no longer open, but a page whose script died before `enhanceSelect` ran
+   would still have a native <select>, and a white one would be worse. */
+.sort__select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.sidebar__tree {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 9px 8px;
+}
+
+/* Kept asymmetric on purpose: this is the tree's
+   section header — a container, not a boxed control — and the 3/7 split is the
+   eyebrow label's rhythm, tight to the `.sidebar__tree` padding above and open
+   to the first row below. Nothing here is a label inside a box. */
+.tree__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  padding: 3px 8px 7px;
+}
+
+.tree__label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tree__new {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tree__new:hover {
+  color: var(--text);
+}
+
+/* 36px with a top hairline, mirroring the pane's footer. */
+.sidebar__foot {
+  flex: none;
+  height: 36px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar__settings {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  padding: 0 14px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar__settings:hover {
+  background: var(--sel);
+  color: var(--text);
+}
+
+.sidebar__settings .icon {
+  flex: none;
+  color: var(--dim);
+}
+
+/* The settings sidebar: 190px of tabs with the way back pinned to
+   its bottom — the mirror of the Settings row above, which is why it reuses
+   that row's rule. */
+.sidebar--settings {
+  width: 190px;
+}
+
+.tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 8px;
+}
+
+/* On the one centering rule like every other boxed control.
+   Symmetric padding was not enough here: `font: inherit` carries body's
+   **unitless** 1.5 down the shorthand, so the line box computed to 18.75px and
+   the font box sat 0.75px high inside it — measured identically on all five
+   tabs, so it was the metric, not noise.
+
+   `line-height: 1` pins the line box to the 12.5px font size, and the padding
+   is the arithmetic that keeps the border box exactly where it was:
+   5 + 18.75 + 5 = 28.75px, and 8.125 + 12.5 + 8.125 = 28.75px. Nothing in the
+   settings sidebar moves. Change one of those three numbers and you owe the
+   other two. The ink token shifts the pair without changing the sum.
+
+   Its focus ring is still the UA's, which is correct: there is no wrapper
+   carrying a focus state for it. */
+.tab {
+  flex: none;
+  padding: calc(8.125px - var(--ink-up-125)) 10px
+    calc(8.125px + var(--ink-up-125));
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tab:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+/* The selected tab is a fill and a brightness, never a hue. */
+.tab[data-selected="yes"] {
+  background: var(--sel);
+  color: var(--text);
+}
+
+.tab:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* The tree ---------------------------------------------------------------- */
+
+.tree {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tree > li.muted {
+  padding: 5px 8px;
+  font-size: 11.5px;
+}
+
+.group__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.group__row:hover {
+  background: var(--sel);
+}
+
+/* The project new notes go into carries the design's selected fill. */
+.group[data-active="yes"] > .group__row {
+  background: var(--sel);
+  border: 1px solid var(--line-strong);
+  padding: 3px 7px;
+}
+
+.group__toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.group__toggle:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* A group holding the note lines are landing in cannot be collapsed (see the
+   comment in main.js). Dimmed would read as "broken"; it keeps its colour and
+   its tooltip explains itself. */
+.group__toggle:disabled {
+  cursor: default;
+}
+
+/* A CSS triangle, turned by 90° when the group is open — 180ms, the same beat
+   as the rows sliding out from under it. */
+.group__caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--dim);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 180ms ease-in-out;
+}
+
+.group[data-open="yes"] .group__caret {
+  transform: rotate(90deg);
+}
+
+.group__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group[data-active="yes"] .group__name {
+  color: var(--text);
+}
+
+.group__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* A note inside this project, the way a file is added inside a folder in an
+   editor. Revealed on hover or keyboard focus; `opacity` rather than
+   `display` so the count beside it never shifts. */
+.group__new {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  /* Same rule as the transcript's actions: a faded-out control is not a click
+     target until it is actually on screen. */
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 90ms ease-out, color 120ms ease-out;
+}
+
+.group__row:hover .group__new,
+.group__row:focus-within .group__new {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.group__new:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.group__new:disabled {
+  cursor: default;
+}
+
+/* The per-project folder and templates, revealed like the `+` beside it. */
+.group__edit {
+  flex: none;
+  opacity: 0;
+  pointer-events: none;
+  font-size: 11px;
+  text-decoration: none;
+  transition: opacity 90ms ease-out, color 120ms ease-out;
+}
+
+.group__row:hover .group__edit,
+.group__row:focus-within .group__edit {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.group__count {
+  flex: none;
+  font: 10.5px var(--mono);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A project a draft names that the config no longer has. Shown, never hidden:
+   a note that disappears from this list reads as lost work. */
+.group__note {
+  flex: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+/* Expand and collapse: 180ms on height, with the caret turning in the same
+   beat. `grid-template-rows: 0fr → 1fr` is the only way to animate to a
+   content height without measuring it in JS; `visibility` rides along so a
+   collapsed group's rows leave the tab order instead of hiding in a clipped
+   box. */
+.group__body {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition: grid-template-rows 180ms ease-in-out, visibility 180ms;
+}
+
+.group[data-open="yes"] .group__body {
+  grid-template-rows: 1fr;
+  visibility: visible;
+}
+
+.group__notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.group__notes > li.muted {
+  padding: 5px 8px 5px 21px;
+  font-size: 11.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the crossfade, drop the movement: the group still opens and closes,
+     it simply stops sliding (the design's motion table). */
+  .group__body,
+  .group__caret {
+    transition: none;
+  }
+}
+
+/* One note ---------------------------------------------------------------- */
+
+.note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 21px;
+  border-radius: 6px;
+}
+
+.note:hover {
+  background: var(--sel);
+}
+
+.note[data-active="yes"] {
+  background: var(--sel);
+}
+
+/* The drag affordance the design draws: six dots at the row's left, on hover
+   only. The row itself is the drag source, across projects too. */
+.note__grip {
+  display: grid;
+  grid-template-columns: 2px 2px;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+}
+
+.note:hover .note__grip {
+  opacity: 1;
+}
+
+.note__grip i {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+/* A recording in progress, on the note the lines are landing in. The only red
+   in the sidebar, and it is only ever on while `#draft-list` says a recording
+   is live — so it can never be left behind by a stale render. */
+.note__live {
+  display: none;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--live);
+}
+
+.tree[data-recording="yes"] .note[data-active="yes"] .note__live {
+  display: block;
+}
+
+.note__open {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.note:hover .note__open {
+  color: var(--text);
+}
+
+.note[data-active="yes"] .note__open {
+  color: var(--text);
+}
+
+.note__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note__count {
+  margin-left: auto;
+  flex: none;
+  font: 10.5px var(--mono);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.note[data-active="yes"] .note__count {
+  color: var(--dim);
+}
+
+/* Unsaved changes. A dot, not a word: the row is narrow. */
+.note__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  align-self: center;
+}
+
+/* Row controls stay out of the way until the row is pointed at or tabbed
+   into — a primed discard is the exception, because a control that says
+   "sure?" must not be able to hide while it means it. */
+.note__tools {
+  display: inline-flex;
+  gap: 8px;
+  flex: none;
+  visibility: hidden;
+}
+
+.note:hover .note__tools,
+.note:focus-within .note__tools {
+  visibility: visible;
+}
+
+.note__tools .linkish {
+  font-size: 11px;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.note__tools .linkish:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.note__discard[data-primed="yes"] {
+  visibility: visible;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Dragging a note into another project. The tree's own small
+   mirror of the transcript's reorder: the lifted row drops to 45% and
+   the group it would land in takes a `--sel` fill with a `--line-strong`
+   outline — an *into* mark, not the insertion bar the transcript uses, because
+   there is no order inside a group to insert into. */
+.note[draggable="true"] {
+  cursor: grab;
+}
+
+.note[data-dragging="yes"] {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.group__row[data-drop="into"] {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* A draft directory that would not parse. Shown and dimmed, never hidden: the
+   whole point is that lost-looking work explains itself. */
+.note--rejected {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding: 4px 8px;
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.note--rejected .note__label,
+.note--rejected .note__meta {
+  overflow-wrap: anywhere;
+  white-space: normal;
+  color: var(--dim);
+}
+
+/* The main area ----------------------------------------------------------- */
+
+/* The one hairline between the sidebar and everything to its right. It lives
+   on the container rather than on each pane, so it is the same line whichever
+   pane is on screen: unbroken from the title bar to the bottom of the
+   window. */
+.main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+}
+
+.pane {
+  display: none;
+}
+
+/* The pane on screen fills the main area; only the panes that are documents
+   scroll as a whole (the transcript scrolls its own list instead). */
+.pane[data-current="yes"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 12px;
+  gap: 10px;
+}
+
+#pane-project[data-current="yes"],
+#pane-new-project[data-current="yes"] {
+  overflow-y: auto;
+  gap: 14px;
+}
+
+/* The session pane owns its own 49/card/36 geometry, so it takes no padding
+   and no gap from the rule above. */
+#pane-session[data-current="yes"] {
+  padding: 0;
+  gap: 0;
+}
+
+.pane__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: none;
+}
+
+.pane__title {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.pane__back {
+  margin-left: auto;
+}
+
+/* The pane header: `project / note.md`, what is in it, and the four controls
+   that act on it. 49px, the sidebar's top block to the pixel. */
+.pane__header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: none;
+  height: 49px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.crumb {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crumb--project {
+  flex: 0 1 auto;
+  color: var(--dim);
+}
+
+.crumb__sep {
+  flex: none;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+/* The file is the name the user gave this note, so it is the one in mono at
+   full brightness. */
+.crumb--note {
+  flex: 0 2 auto;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.pane__meta {
+  display: flex;
+  gap: 8px;
+  /* Shrinks before the actions do: at 900px wide the four controls on the
+     right are the part that has to stay whole. */
+  flex: 0 1 auto;
+  min-width: 0;
+  font: 11.5px var(--mono);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* "0 lines" beside "no note yet" is noise: with no note open the header says
+   so once and stops. */
+#pane-session[data-empty="yes"] .pane__meta {
+  display: none;
+}
+
+.pane__actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* A text action: the design's header controls are words, not buttons with
+   boxes. Dimmed rather than removed when there is nothing to do — a control
+   that vanishes moves the ones next to it out from under the cursor. */
+.action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* Save is the one the eye should find first when it is available. */
+.action--primary:not(:disabled) {
+  color: var(--text);
+}
+
+/* Inert, and still unmistakably a control. Dropping to `--faint`
+   alone made a disabled text-action read as prose — the wizard's Change read
+   as "plain text, no button at all" — and a control nobody
+   recognises cannot carry the reason it is refusing. `--faint` is the design's
+   disabled colour and stays; the dotted underline is what says "this is a
+   control, and there is a reason". Dotted, never dashed: dashed already means
+   "waiting for a key" on `.keycap`. It costs no layout — an underline does not
+   move ink — so nothing shifts when a control goes inert.
+
+   The same three lines are on `.linkish:disabled` and `.set-action:disabled`
+   below; those are the app's other two text-action shapes. */
+.action:disabled {
+  cursor: default;
+  color: var(--faint);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The transcript card                                                      */
+/* ------------------------------------------------------------------------- */
+
+.transcript {
+  margin: 10px;
+  padding: 0;
+  list-style: none;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Stated rather than inherited. `overflow-y: auto` already forces
+     this axis to `auto` — a box cannot scroll one axis and let the other spill —
+     so the horizontal scrollbar the narrow-window bug produced was always this
+     card's. Written down so it reads as the deliberate escape valve it now is:
+     below the row floor (`.line` below) the rows keep their grammar and the
+     card scrolls them sideways instead of crushing them. */
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+#pane-session[data-empty="yes"] .transcript {
+  display: none;
+}
+
+.transcript > li.muted {
+  padding: 11px 14px;
+  font-size: 12.5px;
+}
+
+/* `grip · 74px timestamp · line · actions`, the row grammar of the whole
+   design. A grid rather than a flex row so every timestamp starts in the same
+   column whatever the line above it did. */
+.line {
+  display: grid;
+  grid-template-columns: 12px 74px 1fr auto;
+  /* **The row's floor.** `1fr` is a *free*
+     track: it shrinks to 0 without complaint, and at a ~544px logical window
+     this grid measured `12px 74px 0px ~170px` — the text column gone, every
+     word painting one glyph per line down a 2000px-tall row. A floor here is
+     the whole fix, because `min-width` on a grid item is what stops the free
+     track from being the thing that gives.
+     480px is the row's own arithmetic, not a guess: 2px selection edge + 12px
+     padding + 12px grip + 74px timestamp + 3 × 12px gap + ~170px of actions +
+     14px padding leaves ~160px of text — the narrowest a sentence can be and
+     still read as a sentence. Below it the card (`.transcript`, above) scrolls
+     an intact row sideways, which is a legible degradation; the collapse was
+     not. The `main` window's 620×440 minimum in tauri.conf.json keeps the app
+     itself out of this region — this floor is what makes the region between
+     the two survivable. */
+  min-width: 480px;
+  align-items: baseline;
+  gap: 12px;
+  /* 14px of it either side, as before — but the left 2px are now the
+     selection edge, transparent until the row is in the set, so a selection
+     never shifts the text sideways (the design draws exactly
+     this, and says so). */
+  padding: 11px 14px 11px 12px;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--line);
+  /* The insertion bar fades in over 120ms; the lifted row and the ones it
+     displaces settle over 200ms (the design's motion table). The fill and
+     the edge are one 120ms change ("Selection fill and edge", 120ms
+     ease-out) — the same duration the hover already used. */
+  transition: background-color 120ms ease-out, border-left-color 120ms ease-out,
+    box-shadow 120ms ease-out, opacity 200ms ease-in-out;
+}
+
+/* In the set: `--sel` fill and a 2px `--line-strong`
+   edge, and **no checkbox** — the fill and the edge already say which rows are
+   in it. The hover fill below is the same `--sel`, so which of the two wins on
+   a pointed-at selected row cannot be seen — only the edge separates them. */
+.line[data-selected="yes"] {
+  background: var(--sel);
+  border-left-color: var(--line-strong);
+}
+
+/* Rows are tab stops (Enter edits the focused line, Space toggles
+   its membership), so the focus ring has to be ours rather than the UA's —
+   and it is the same hairline the rest of the window focuses with. DOM focus
+   inside this window; nothing here activates or raises anything
+   (invariant 2). */
+.line:focus-visible {
+  outline: 1px solid var(--dim);
+  outline-offset: -2px;
+}
+
+.line:hover {
+  background: var(--sel);
+}
+
+.line:last-child {
+  border-bottom: 0;
+}
+
+/* Six dots at the row's left, on hover only — the same grip the sidebar uses,
+   so the two drags read as one gesture. */
+.line__grip {
+  display: grid;
+  grid-template-columns: 2px 2px;
+  gap: 2px;
+  align-self: center;
+  opacity: 0;
+  cursor: grab;
+  transition: opacity 90ms ease-out;
+}
+
+.line:hover .line__grip,
+.line:focus-within .line__grip {
+  opacity: 1;
+}
+
+.line__grip i {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+/* The *system* monospace stack, so times line up column-wise without a
+   webfont ever being asked for (invariant 3). */
+.line__time {
+  font: 12px/1.6 var(--mono);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.line__body {
+  min-width: 0;
+}
+
+.line__text {
+  font-size: 13.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+/* An edit is a fact about the line, said quietly beside it; the original text
+   stays reachable as the title. */
+.line__edited {
+  margin-left: 9px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* The field sits exactly where the text was, at the same size and position,
+   so nothing jumps and the eye does not have to find the line again
+   (the design's editing state). 140ms on border and background only. */
+.line__text[data-editing="yes"] {
+  display: block;
+  padding: 5px 9px;
+  background: var(--bg);
+  border: 1px solid var(--dim);
+  border-radius: 7px;
+  outline: none;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+/* The two keys that end the edit, and the reminder that the recording
+   underneath is untouched — editing text never re-runs transcription and
+   never touches the audio. */
+.line__hint {
+  display: flex;
+  gap: 12px;
+  margin-top: 7px;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+/* Soft-deleted: still here, plainly not in the note. */
+.line[data-deleted="yes"] .line__text {
+  text-decoration: line-through;
+  color: var(--faint);
+}
+
+/* A re-transcribe in flight: `--muted` with a mono marker and no actions, the
+   same state the design draws for a line still being transcribed. */
+.line[data-pending="yes"] .line__text {
+  color: var(--muted);
+}
+
+.line__pending {
+  margin-left: 6px;
+  font: 12px var(--mono);
+  color: var(--faint);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Row states — the design's error states plus its row grammar               */
+/*                                                                           */
+/* Five states, one row grammar, separated the way everything else in this    */
+/* window is: brightness, weight and a mono marker. The one exception is      */
+/* `failed`, which the design allows to be `--bad` "because the line itself   */
+/* is the failure" — the second and last meaning red has here.               */
+/*                                                                           */
+/* Every one of these hangs off `data-status`, whose value is the backend's:  */
+/* a stored line's folded state, or the pending snapshot's. Nothing in        */
+/* main.js decides a colour, and nothing uses the `hidden` attribute.         */
+/* ------------------------------------------------------------------------- */
+
+/* E · queued, and the first half of B: waiting for the model, so the row says
+   what was *heard* — a duration, never a guess at the words. */
+.line[data-status="queued"] .line__text,
+.line[data-status="transcribing"] .line__text {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* C · held: the words exist, only the write failed, so the text reads at full
+   brightness exactly like a line that landed. What marks it is the mono
+   `--faint` tag, which is the whole of the difference in the drawn row. */
+.line[data-status="held"] .line__text {
+  cursor: default;
+}
+
+/* The tag in the actions column: `queued` / `held`, mono `--faint`, in the
+   place the hover controls would be — because on these rows there are none. */
+.line__tag {
+  align-self: center;
+  font: 11px var(--mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* B · failed. The row's own text is empty (so the editor opens empty, ready
+   for the words the user actually said) and this is the sentence beside it. */
+.line__failed {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--bad);
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+
+/* While the user is typing the words in, the sentence about the failure would
+   be a second answer sitting next to the field. */
+.line__text[data-editing="yes"] ~ .line__failed {
+  display: none;
+}
+
+/* Retry is the design's one row-level primary: `--text` against the `--muted`
+   the rest of the hover group reads at, and no fill — the row grammar stays as
+   drawn. */
+.line__tool--primary {
+  color: var(--text);
+}
+
+/* Reordering. The lifted row drops to 45% and a `--line-strong`
+   insertion bar marks where it would land. */
+.line[draggable="true"] {
+  cursor: grab;
+}
+
+.line[data-dragging="yes"] {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.line[data-drop="above"] {
+  box-shadow: inset 0 2px 0 var(--line-strong);
+}
+
+.line[data-drop="below"] {
+  box-shadow: inset 0 -2px 0 var(--line-strong);
+}
+
+/* Controls stay out of the way until the row is pointed at or tabbed into:
+   the transcript is meant to read as text, not as a toolbar. `opacity` rather
+   than `display` so the row does not reflow under the cursor. */
+.line__tools {
+  display: inline-flex;
+  /* 10px between *labels*. The buttons below reach 4px past their text on each
+     side for the hit target and take it straight back in margin, so this stays
+     the spacing the eye reads and the grown targets still end up 2px apart —
+     a miss between two of them hits the row, never the wrong button. */
+  gap: 10px;
+  align-self: center;
+  opacity: 0;
+  /* An invisible control must not be a live click target: the design fades
+     these in, and a fade leaves the box hit-testable the whole time. Delete
+     lives in here. */
+  pointer-events: none;
+  transition: opacity 90ms ease-out;
+}
+
+.line:hover .line__tools,
+.line:focus-within .line__tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* At 11.5px with no padding these were a ~12px-tall target, which real use
+   found hard to hit. The box grows to the 24px
+   minimum both ways and the negative margins hand back exactly what the padding
+   took — so the ink, the label spacing and the row's height are unchanged and
+   only the hit-testable area grew. Deliberately no pill and no border: the
+   design's hover-reveal row grammar stays as drawn, and pills were
+   considered and dropped. */
+.line__tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 6px 4px;
+  margin: -6px -4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.line__tool:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* The one place a destructive control is allowed to reach for red, and only
+   under the cursor (the design's colour rules). */
+.line__tool--danger:hover:not(:disabled) {
+  color: var(--bad);
+}
+
+.line__tool:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The empty project: the pane is the place to make the first note          */
+/* ------------------------------------------------------------------------- */
+
+.invite {
+  display: none;
+}
+
+#pane-session[data-empty="yes"] .invite {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 10px;
+  padding: 40px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  text-align: center;
+}
+
+/* The logo again, at the size the design draws it here: 5px bars, 2.5px
+   radius, heights 14/30/21/11. */
+.invite__glyph {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  flex: none;
+}
+
+.invite__glyph i {
+  width: 5px;
+  border-radius: 2.5px;
+  background: var(--faint);
+}
+
+.invite__glyph i:nth-child(1) {
+  height: 14px;
+}
+
+.invite__glyph i:nth-child(2) {
+  height: 30px;
+}
+
+.invite__glyph i:nth-child(3) {
+  height: 21px;
+}
+
+.invite__glyph i:nth-child(4) {
+  height: 11px;
+}
+
+.invite__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.invite__note {
+  margin: 0;
+  max-width: 420px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--dim);
+}
+
+.invite__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.invite__path {
+  margin: 0;
+  font: 11px var(--mono);
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+/* The design's primary button: `--text` fill, `--bg` label, 600 weight, and
+   the one centering rule — inline-flex, `line-height: 1`, symmetric
+   paddings, no hand-tuned half-pixel. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(6px - var(--ink-up-13)) 16px calc(6px + var(--ink-up-13));
+  border: 1px solid var(--text);
+  border-radius: var(--radius-ctl);
+  background: var(--text);
+  color: var(--bg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  opacity: 0.86;
+}
+
+.button:disabled {
+  cursor: default;
+  background: transparent;
+  border-color: var(--line);
+  color: var(--faint);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The pane footer: where this note goes, and what is actually running       */
+/* ------------------------------------------------------------------------- */
+
+.pane__footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  height: 36px;
+  padding: 0 18px;
+  border-top: 1px solid var(--line);
+  font: 11px var(--mono);
+}
+
+.foot__path {
+  min-width: 0;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foot__right {
+  display: flex;
+  gap: 12px;
+  margin-left: auto;
+  flex: none;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Unsaved changes read one step brighter than "saved" — the same grayscale
+   separation the rest of the window uses, never a colour. */
+.foot__state[data-open="yes"] {
+  color: var(--dim);
+}
+
+/* How far behind the file is, in lines Sotone is holding in memory. The
+   design's rule: "the footer counts them at full brightness". It is
+   `--warn` — grayscale at full text brightness — because the app could not do
+   something, not because a line is wrong. */
+.foot__held {
+  display: none;
+}
+
+.foot__held[data-open="yes"] {
+  display: inline;
+  color: var(--warn);
+}
+
+/* Save says the same thing from the header. It stays *enabled*: saving what can
+   be saved is allowed, and a save is one of the moments the worker retries the
+   held lines. */
+.pane__actions .action[data-behind="yes"]:not(:disabled) {
+  color: var(--warn);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Error states — the strip, the dimmed card, the pane takeover              */
+/*                                                                           */
+/* Every appearance here hangs off `#pane-session[data-condition]`, whose     */
+/* value is what the backend published on `sotone://condition` and nothing     */
+/* the window worked out for itself. CSS owns the look; main.js only names    */
+/* the state. Nothing uses the `hidden` attribute — every rule below sets     */
+/* `display`, `opacity` or `grid-template-rows`, and an author display rule   */
+/* beats the UA sheet's `[hidden] { display: none }`.                         */
+/*                                                                           */
+/* Red does not appear anywhere in this section. A condition is grayscale     */
+/* `--warn` at full text brightness with `--line-strong` doing the            */
+/* separating; red stays a live recording and a line that failed to           */
+/* transcribe, and nothing else.                                             */
+/* ------------------------------------------------------------------------- */
+
+/* The strip **pushes the transcript down** rather than covering it, which is
+   the whole reason it is an in-flow grid row and not the fixed-position popup
+   it replaces. A 0fr → 1fr single-row grid is the only way to animate to a
+   content height without measuring it in JS, and it is the same mechanism the
+   sidebar's group bodies use. 200ms ease-out, and the same 200ms in reverse
+   when it leaves (the design's motion table). */
+.strip {
+  display: grid;
+  grid-template-rows: 0fr;
+  flex: none;
+  opacity: 0;
+  transition:
+    grid-template-rows 200ms ease-out,
+    opacity 200ms ease-out;
+}
+
+.strip[data-open="yes"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+/* The design's rule: keep the crossfade, drop the movement. The height
+   animation *is* the movement here, so it goes to zero and the content below
+   lands where it is going in one step. This override lives beside the rule it
+   beats rather than in the motion block at the top of the sheet — same
+   specificity, so the later one wins, and the motion block is earlier. */
+@media (prefers-reduced-motion: reduce) {
+  .strip {
+    transition-duration: 0ms, 200ms;
+  }
+}
+
+/* The row that collapses. `min-height: 0` is load-bearing: without it a grid
+   item refuses to shrink below its content and the strip never closes. */
+.strip__box {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Everything inside is inert while the strip is shut, so a collapsed strip
+   cannot be tabbed into or clicked through. */
+.strip[data-open="no"] .strip__box {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The design's exact box: `--panel-high` on 1px `--line-strong`, radius 12,
+   10px margin, padding 10px 14px. The margins are the transcript card's, so
+   the two line up down both edges. The margin lives on the inner box rather
+   than on the animating grid, because a collapsed grid still owns its margins
+   and the gap would stay behind. */
+.strip[data-open="yes"] .strip__box {
+  margin: 10px 10px 0;
+  padding: 10px 14px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+}
+
+.strip__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 13px `--warn` — the design's "the app refused or could not do this" colour,
+   which is grayscale at full text brightness. */
+.strip__title {
+  font-size: 13px;
+  color: var(--warn);
+}
+
+/* One sentence. Not two: what stopped, what happened to the recording, then
+   the action. */
+.strip__note {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.strip__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* An action that is not for this condition is out of the flow entirely, so the
+   ones that remain stay against the right edge. `data-show`, not `hidden`. */
+.strip__primary[data-show="no"],
+.strip__quiet[data-show="no"] {
+  display: none;
+}
+
+/* At most one of these per strip (design: "at most one primary action"). The
+   secondary control style — `--panel-high` on `--line-strong` — rather than the
+   filled primary, because the strip is already sitting on `--panel-high` and a
+   filled button in it would read as the loudest thing in the window. */
+.strip__primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(4px - var(--ink-up-125)) 13px calc(4px + var(--ink-up-125));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--panel-high);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.strip__primary:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+/* A disabled Keep mine is the structural mirror of the backend's own refusal
+   to save mid-recording — the same arrangement the project rows' `+` uses. It
+   stays in place and goes inert rather than disappearing under the cursor. */
+.strip__primary:disabled {
+  cursor: default;
+  border-color: var(--line);
+  color: var(--faint);
+}
+
+.strip__quiet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(4px - var(--ink-up-125)) 11px calc(4px + var(--ink-up-125));
+  border: 1px solid transparent;
+  border-radius: var(--radius-ctl);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.strip__quiet:hover {
+  background: var(--sel);
+  color: var(--text);
+}
+
+/* D · File changed on disk. The one state that takes the transcript out of
+   service: the card drops to 55% and the header actions go `--faint` until the
+   conflict is answered. Recording still works underneath — new lines land in
+   the note and queue behind the decision. */
+.transcript,
+.cdiff {
+  transition: opacity 200ms ease-out;
+}
+
+#pane-session[data-condition="fileConflict"] .transcript,
+#pane-session[data-condition="fileConflict"] .cdiff {
+  opacity: 0.55;
+}
+
+/* Faint *and* disabled: the colour is this rule's, the inertness is
+   `renderSaveState`'s. Two mechanisms on purpose — a control that only looked
+   inert would still be clickable, and one that was only disabled would not say
+   why the card beneath it is dimmed. */
+#pane-session[data-condition="fileConflict"] .pane__actions .action {
+  color: var(--faint);
+}
+
+/* The diff, expanded **inside** the dimmed card. Collapsed by default: it
+   answers "what would I lose", which is a question not everybody asks.
+
+   One card with a divider, not two boxes stacked: the transcript gives up its
+   bottom edge and its bottom corners while this is open, and the diff gives up
+   its top ones, so the two read as the lower half of the note that is out of
+   service. `data-diff` on the pane is set by `renderDiff` — the transcript
+   cannot know about its own footnote, and `:has()` for one hairline is not
+   worth the engine floor. */
+.cdiff {
+  display: none;
+}
+
+#pane-session[data-diff="yes"] .transcript {
+  margin-bottom: 0;
+  border-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.cdiff[data-open="yes"] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 0 10px 10px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0 0 12px 12px;
+  animation: rise 180ms ease-out;
+}
+
+.cdiff__panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.cdiff__pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cdiff__label {
+  margin: 0 0 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.cdiff__text {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 6px;
+  flex: 1;
+  min-height: 0;
+  max-height: 30vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cdiff__line {
+  padding-left: 4px;
+  /* A gutter on every line, so a marked one does not shift its neighbours. */
+  border-left: 2px solid transparent;
+}
+
+/* Removed and added are told apart by weight and a gutter rule, not by red and
+   green: the palette is grayscale by design, and a colour-blind
+   reader gets the same information either way. Carried over unchanged from the
+   popup this replaced — the renderer moved, the reading did not. */
+.cdiff__line[data-mark="removed"] {
+  border-left-color: var(--faint);
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
+.cdiff__line[data-mark="added"] {
+  border-left-color: var(--text);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.cdiff__stale {
+  display: none;
+}
+
+.cdiff__stale[data-open="yes"] {
+  display: block;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--warn);
+}
+
+/* F · The hotkey machinery is dead. The failure that removes the app's whole
+   purpose takes the pane: the same card, centred, one primary action and a
+   recheck. The sidebar and Settings stay reachable — the pane is taken, not
+   the window. */
+.takeover {
+  display: none;
+}
+
+#pane-session[data-condition="hotkeyDead"] .takeover {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+  margin: 10px;
+  padding: 24px 40px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  text-align: center;
+  animation: rise 180ms ease-out;
+}
+
+/* Whatever the note was, it is not the question on screen. The strip goes too:
+   `condition` is one value, and this one does not use a strip. */
+#pane-session[data-condition="hotkeyDead"] .transcript,
+#pane-session[data-condition="hotkeyDead"] .invite,
+#pane-session[data-condition="hotkeyDead"] .cdiff,
+#pane-session[data-condition="hotkeyDead"] .strip {
+  display: none;
+}
+
+.takeover__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 460px;
+}
+
+.takeover__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--warn);
+}
+
+.takeover__note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.takeover__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The second action beside a filled primary: the secondary control style, and
+   never a second filled button. */
+.button--quiet {
+  background: var(--panel-high);
+  border-color: var(--line-strong);
+  color: var(--text);
+  font-weight: 400;
+}
+
+/* `.button`'s own hover is an opacity fade, which would stack with this fill
+   and read as two effects at once. The secondary control's hover is the fill
+   alone (the design's control rules). */
+.button--quiet:hover:not(:disabled) {
+  background: var(--sel);
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The footer message slot                                                   */
+/*                                                                           */
+/* Invented surface, flagged as such: the design draws the `--warn` treatment */
+/* for a refusal but gives transient one-off failures no home of their own.   */
+/* One line, latest wins, no history — history is the debug log — because the */
+/* alternatives are the two things the design rules out by name: a toast that */
+/* disappears before it is read, and a modal.                                */
+/*                                                                           */
+/* Hairline-separated from the path beside it, `--warn` at full text          */
+/* brightness. It does not fade on a timer; it is replaced by the next one or */
+/* cleared by the next thing that works.                                     */
+/* ------------------------------------------------------------------------- */
+
+.foot__message {
+  display: none;
+}
+
+.foot__message[data-open="yes"] {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  color: var(--warn);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: appear 180ms ease-out;
+}
+
+/* The condition's cause, plainly, in the footer — `Hotkeys: dead`,
+   `no input device`, `editing paused`. Mono because it is a readout, and
+   deliberately not a repeat of the strip's sentence: the design's rule for
+   state F is that the status bar reports the cause rather than echoing the
+   message. */
+.foot__condition {
+  display: none;
+}
+
+.foot__condition[data-open="yes"] {
+  display: inline;
+  color: var(--faint);
+}
+
+/* The same slot, in the empty phase, where there is no pane footer to hold it.
+   One message, written to both. */
+.empty__message {
+  display: none;
+}
+
+.empty__message[data-open="yes"] {
+  display: block;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--warn);
+  animation: appear 180ms ease-out;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The debug log                                                             */
+/*                                                                           */
+/* Where the notices list used to be, and deliberately not the same thing: it */
+/* is off by default, it is the whole traffic rather than a filtered slice,   */
+/* and nothing in the product depends on it being read. In memory only —      */
+/* nothing here is written to disk; the switch is a localStorage display      */
+/* preference and that is all that persists.                                 */
+/* ------------------------------------------------------------------------- */
+
+.debuglog {
+  display: none;
+}
+
+/* Kept asymmetric on purpose: a drawer, not a control.
+   The 6/8 split is layout — the top hairline already reads as separation, so
+   the head sits closer to it than the last log line sits to the window edge. */
+.debuglog[data-open="yes"] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  animation: rise 180ms ease-out;
+}
+
+.debuglog__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.debuglog__title {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+
+.debuglog__count {
+  font: 10.5px var(--mono);
+  color: var(--faint);
+}
+
+.debuglog__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 108px;
+  overflow-y: auto;
+  font: 11px/1.5 var(--mono);
+}
+
+.debuglog__list li {
+  display: flex;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.debuglog__time,
+.debuglog__level {
+  flex: none;
+  color: var(--faint);
+}
+
+/* A fixed column so the messages line up whatever the level tag is — the point
+   of a log is the scan down the left edge. */
+.debuglog__level {
+  width: 5ch;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.debuglog__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The same grayscale separation the rest of the window uses: brightness and
+   weight, never a hue. Even here `--bad` would be a fourth meaning for red. */
+.debuglog__list li[data-level="debug"] .debuglog__text {
+  color: var(--faint);
+}
+
+.debuglog__list li[data-level="warn"] .debuglog__text,
+.debuglog__list li[data-level="error"] .debuglog__text {
+  color: var(--warn);
+}
+
+/* The pick-or-create stop, and any in-page popup after it.
+   Deliberately the same shape as the conflict panel above — the
+   rule: a question Sotone asks is a centered, fixed-position, in-page popup
+   with a backdrop, and never a native dialog (a real dialog window steals
+   focus, invariant 2). Fixed rather than in-flow so it cannot open below the
+   fold, which is the bug that made Save look dead for two days. */
+.popup {
+  display: none;
+}
+
+.popup[data-open="yes"] {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+  padding: 24px;
+}
+
+.popup__box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 460px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+/* The clash question a drop asks, on the design's glass — the same material
+   as the context menu, which is the surface the design gives to something
+   that opens *over* the tree rather than inside a pane. It is the popup grammar
+   in every other respect: centered, fixed, scrimmed, in-page.
+
+   Narrower than the pick-or-create stop because it is two sentences and two
+   buttons; a 460px box around forty words reads as a form, and this is a
+   question. */
+.popup__box--glass {
+  max-width: 380px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-line);
+  box-shadow: var(--shadow);
+}
+
+.popup__title {
+  margin: 0;
+  font-size: 13px;
+}
+
+.popup__or {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.popup__actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The context menu — the design's one menu grammar,                         */
+/* built in the page rather than by the OS                                   */
+/*                                                                           */
+/* The tray could not take this: a notification-area flyout is drawn by the  */
+/* OS. An in-window menu can, so                                             */
+/* the drawn glass lives here — `--glass` with `--glass-blur`, a 1px         */
+/* `--glass-line`, `--radius`, `--shadow`, 260px, items 12.5px at 5px 10px   */
+/* on a 6px radius with a `--sel` hover, separators `--glass-line`.          */
+/*                                                                           */
+/* `data-open`, never `hidden`: the rule that shows it sets `display`, and   */
+/* an author display rule beats the UA sheet's `[hidden]`. Positioned in     */
+/* JS, clamped to 8px inside the window.                                     */
+/* ------------------------------------------------------------------------- */
+
+.menu {
+  display: none;
+}
+
+.menu[data-open="yes"] {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 260px;
+  padding: 5px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  /* Opacity only, deliberately: the menu's own rect is measured by the
+     clamp the instant it opens, and a transform in
+     flight would report a box that is not where it will be. */
+  animation: menu-in 120ms ease-out;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.menu:focus,
+.menu:focus-visible {
+  /* It is focused so the arrow keys reach it, not because it is a control. */
+  outline: none;
+}
+
+.menu__item {
+  display: block;
+  width: 100%;
+  /* The ink term applies here too: the offset between ink and line-box
+     centre is a pure font property, independent of this row's line-height. */
+  padding: calc(5px - var(--ink-up-125)) 10px calc(5px + var(--ink-up-125));
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu__item:hover:not(:disabled),
+.menu__item:focus-visible {
+  background: var(--sel);
+  outline: none;
+}
+
+/* An item a live recording would refuse: offered, dim, and saying why in its
+   `title` rather than pretending it would work. */
+.menu__item:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+.menu__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--glass-line);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Styled dropdowns — the same glass, for the one popup this                 */
+/* window did not own                                                        */
+/*                                                                           */
+/* A native <select>'s open list is drawn by the OS, outside this page's      */
+/* cascade, which is why the three comments elsewhere in this sheet (on      */
+/* `.sort__select option`, `.field__input option`, `.pick__select option`)   */
+/* all say the same defeated thing: name the colours and hope. Real use      */
+/* showed what that is worth. So the list moves in here, into the            */
+/* menu grammar of the design's own menu — `--glass` with `--glass-blur`, a  */
+/* 1px `--glass-line`, `--radius`, `--shadow`, rows at 12.5px on a 6px       */
+/* radius with a `--sel` hover — and no new colour is invented for it.       */
+/*                                                                           */
+/* The CLOSED control is deliberately untouched: the button that replaces    */
+/* the <select> wears the <select>'s own class, so `.pick`, `.sort` and      */
+/* `.field` dress it with their own rules — same padding, same hairline,     */
+/* same `:focus-within`. The one difference is width, and it is inherent: a  */
+/* <select> is as wide as its longest option and a button as wide as the     */
+/* value it is showing.                                                      */
+/* ------------------------------------------------------------------------- */
+
+/* The <select> stays — it is still the value, still what `change` fires on,
+   still what every existing listener listens to. It is only taken out of the
+   layout and out of the pointer's reach: `pointer-events: none` is the whole
+   of "the native popup can never appear again", because that popup only opens
+   when the <select> itself is the thing pressed. Not `display: none`, which
+   would also take away the ability to focus it from script. */
+select[data-enhanced="yes"] {
+  position: absolute;
+  inset: auto;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* The control the user actually sees. Everything about its box comes from the
+   class it inherited from the <select>; this adds only what a <button> gets
+   wrong in that place — a label centred where a value reads from the left, and
+   an arrow cursor on something that opens a list. Flex plus the symmetric
+   padding those classes already carry is also the centring recipe. */
+.drop__button {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.drop__button:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* The value, in its own element rather than as the button's text: Blink lays a
+   button's children out in an anonymous box that `text-overflow` does not
+   reliably reach, and a microphone name is routinely longer than the box. Here
+   it shortens to an ellipsis, as it did when a <select> drew it. */
+.drop__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* The ink term for the value in a `.pick`/`.sort`/`.field` box. These
+     boxes centre by flex without a padding pair to bias, but the label is its
+     own element, so the same measured lift is a relative shift here. The
+     script-dead fallback <select> stays where the UA puts it. */
+  position: relative;
+  top: calc(-1 * var(--ink-up-125));
+}
+
+/* `data-open`, never `hidden`: the rule that shows it sets `display`, and an
+   author display rule beats the UA sheet's `[hidden]`. */
+.drop {
+  display: none;
+}
+
+.drop[data-open="yes"] {
+  position: fixed;
+  /* Above the popups it can be opened inside (`.popup` is 10) and above the
+     context menu (20), which it never shares the screen with anyway. */
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px;
+  /* ~100 languages have to fit somewhere. The height is set in JS from the
+     room the anchor leaves; this is the ceiling. `color-scheme` in tokens.css
+     is what makes the scrollbar match the palette. */
+  max-width: min(320px, calc(100vw - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  /* Opacity only, for the reason `menu-in` exists at all: this box is measured
+     the instant it opens — by the clamp that keeps it on screen — and a
+     transform in flight would report a rect that is not where it will be. */
+  animation: menu-in 120ms ease-out;
+}
+
+/* Same box as `.menu__item` (28.75px), reached by arithmetic rather than by
+   eye: symmetric padding against a `line-height: 1` line box, so the label
+   sits in the middle of the row by arithmetic instead of by hand. */
+.drop__option {
+  display: block;
+  flex: none;
+  padding: calc(8.125px - var(--ink-up-125)) 10px
+    calc(8.125px + var(--ink-up-125));
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* The value in force, in this app's own selection grammar (the same one
+   `.line` uses): `--sel` fill and a `--line-strong` edge, and **no check
+   mark** — the fill and the edge already say which row it is. The hover fill
+   below is the same `--sel`, so on a pointed-at selected row only the edge
+   separates the two, exactly as it does in the transcript. */
+.drop__option[aria-selected="true"] {
+  background: var(--sel);
+  box-shadow: inset 2px 0 0 var(--line-strong);
+}
+
+.drop__option:hover,
+.drop__option[data-active="yes"] {
+  background: var(--sel);
+}
+
+/* Where the keyboard is, which the pointer's hover must not be mistaken for.
+   The same hairline every focusable thing in this window takes — it cannot use
+   `:focus-visible` itself, because DOM focus never leaves the button and the
+   row is named by `aria-activedescendant` instead. */
+.drop__option[data-active="yes"] {
+  outline: 1px solid var(--dim);
+  outline-offset: -2px;
+}
+
+/* An option the <select> itself marks unavailable: shown, dim, and inert —
+   the `.menu__item:disabled` reading, one grammar for both glass lists. */
+.drop__option[aria-disabled="true"] {
+  color: var(--faint);
+  cursor: default;
+}
+
+.drop__option[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Panels: one project, new project, settings, the first run                */
+/* ------------------------------------------------------------------------- */
+
+.projects,
+.settings {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  flex: none;
+}
+
+.projects__head,
+.settings__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.settings__title {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.projects__name {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.projects__mark {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.projects__tools {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* The first-run panel's model list. Its rows are Settings' rows — the
+   same renderer draws the rejects in both places — so all this owns is the
+   list, and the first row's hairline, which inside a settings card is the
+   card's own job. */
+.settings__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* Only the "Nothing here yet." line inherits this: every other child is a
+     `.set-row`, and those name their own sizes. */
+  font-size: 13px;
+}
+
+.settings__list > .set-row:first-child {
+  border-top: 0;
+}
+
+.settings__list > .set-row {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* A labelled input with an optional button after it. One row, so the folder and
+   its Browse button read as one control. */
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* Nothing to pick from. A data attribute rather than the `hidden` attribute,
+   because the rule above sets `display`. */
+.field[data-empty="yes"] {
+  display: none;
+}
+
+.field__label {
+  flex: none;
+  width: 108px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field__input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.field__input:focus {
+  outline: 1px solid var(--line-strong);
+}
+
+/* Same fallback, same reason as the sort control's. */
+.field__input option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* What the filename template would produce right now. Rendered by the backend —
+   the expansion lives in Rust and is never reimplemented here. */
+.field__preview {
+  flex: 1;
+  min-width: 0;
+  font: 12px/1.45 var(--mono);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* A button that reads as a link: used wherever a control is an aside rather
+   than a headline. */
+.linkish {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.linkish:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* Dimmed rather than removed: a control that vanishes when its stack empties
+   moves the ones next to it out from under the cursor. It keeps its underline
+   — dropping the decoration and fading to 40% was the one place a
+   disabled control stopped looking like a control at all. `--faint` is the
+   design's disabled colour; the dotted rule is the shared "inert, with a
+   reason" mark described at `.action:disabled`. */
+.linkish:disabled {
+  cursor: default;
+  color: var(--faint);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* The first run. Grayscale like the rest — nothing here is an alert,
+   because an empty models folder is the expected state of a fresh install. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+/* The specific reason this machine has no session. Not red: it is a state, not
+   an error. */
+.empty__reason {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+
+/* Only the prose paragraphs: `.panel__lead` keeps its own spacing, and a rule
+   broad enough to catch it would quietly restyle the heading of every panel
+   this view borrows. */
+.empty p.muted {
+  margin: 0 0 8px;
+}
+
+.empty p.muted:last-child {
+  margin-bottom: 0;
+}
+
+#view-empty code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Selectable, and only that: no link, no click target, nothing that could open
+   a browser. Copying is the button's job. */
+.empty__url {
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.empty__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.models-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.models-table th,
+.models-table td {
+  text-align: left;
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.models-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.models-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* The cloned model guide's own box. It holds the two sections that
+   used to be direct children of the panel around it, so it carries the gap
+   they used to get from that panel. */
+.model-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The first-run wizard                                                      */
+/*                                                                           */
+/* A 620×449 window — set at launch from Rust, in LogicalSize — holding the   */
+/* title bar, one centred content column and a 52px footer. The body grammar  */
+/* is the mock's: a 17px title, one 12.5px `--dim` paragraph, then the        */
+/* control, and nothing else. Where a step has several settings they go in    */
+/* the settings-window card (`.set-card`), which is why almost                */
+/* nothing below is a new row style — the rows are the ones Settings already  */
+/* has.                                                                      */
+/*                                                                           */
+/* Nothing here is red. `--live` means a recording is running and `--bad`     */
+/* means a line failed; a first run has neither, so the whole surface         */
+/* separates by brightness and hairlines like the rest of the app.           */
+/* ------------------------------------------------------------------------- */
+
+.onboarding {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The mock's `36px 44px` padding. Its "14px gaps" are between the pieces of a
+   step, and the drawn steps set that themselves (16px, 18px on the welcome) —
+   so the gap lives on `.wiz` below and this holds exactly one child.
+
+   `safe center` rather than a plain `center`: the model step is the one that
+   can be taller than the frame, and a centred overflowing box in a scroll
+   container has its *top* clipped with no way to reach it. The plain value is
+   written first so a browser that does not know the keyword still centres. */
+.onboarding__body {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  padding: 36px 44px;
+  overflow-y: auto;
+  align-content: center;
+  align-content: safe center;
+}
+
+/* One step at a time. `data-current`, never `hidden`: the rule that shows a
+   step sets `display`. Every step occupies the same grid cell, so
+   the crossfade below has nothing to push around. */
+.wiz {
+  display: none;
+  grid-area: 1 / 1;
+}
+
+.wiz[data-current="yes"] {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* The title block is one 8px column inside the step's 16px one; as siblings
+   that is the step gap minus eight. */
+.wiz__title + .wiz__prose {
+  margin-top: -8px;
+}
+
+/* Step one is the only centred layout, as the design draws it. */
+.wiz--centred[data-current="yes"] {
+  align-items: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.wiz__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.wiz__prose {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dim);
+  text-wrap: pretty;
+}
+
+.wiz__prose code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* The welcome logo: the title bar's four bars at the mock's larger size — 6px
+   wide, radius 3, heights 18/40/28/14, 6px apart in a 44px row. CSS
+   rectangles, like every other Sotone glyph: no image, nothing fetched. */
+.wiz-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  flex: none;
+}
+
+.wiz-logo i {
+  width: 6px;
+  border-radius: 3px;
+  background: var(--dim);
+}
+
+.wiz-logo i:nth-child(1) {
+  height: 18px;
+}
+
+.wiz-logo i:nth-child(2) {
+  height: 40px;
+}
+
+.wiz-logo i:nth-child(3) {
+  height: 28px;
+}
+
+.wiz-logo i:nth-child(4) {
+  height: 14px;
+}
+
+.wiz__lead {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-width: 420px;
+}
+
+.wiz__brand {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.wiz--centred .wiz__prose {
+  font-size: 13px;
+}
+
+/* The three facts that decide whether someone keeps going. Mono, because they
+   are machine facts rather than prose. */
+.wiz__facts {
+  margin: 0;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+/* What will exist on disk: the example note after the first recording, and the
+   folder a project name would create. Mono for the same reason every other
+   path in this app is. */
+.wiz__example {
+  margin: 0;
+  font: 11.5px/1.5 var(--mono);
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+/* Why this machine has no model, from the status event. Not red: an empty
+   models folder is the expected state of a fresh install. */
+.wiz__reason {
+  display: none;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.wiz__reason[data-open="yes"] {
+  display: block;
+}
+
+/* The notes folder: a path in a field-shaped box that is not an input — the
+   only way to change it is the picker beside it, because a webview cannot
+   check whether a typed path exists. */
+.wiz-path {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* No `line-height: 1` here, deliberately: mono forced to a line box
+   at its own font size overflows that box *asymmetrically* — at 12.5px the
+   glyph box is 14.4px, and the 1.9px of overflow lands 1.6px above the line box
+   against 0.3px below, so the path rendered ~0.65px high inside its field. That
+   is the keycap finding read in reverse: `line-height: 1` is the centring
+   convention for the UI font in a padded box, and the `font` shorthand's own
+   reset to `normal` is the centring convention for mono. The box grows to the
+   font's natural ~30px; it is flex-centred in a row the `Choose…` button
+   already sizes, and nothing measures against its height. */
+.wiz-path__value {
+  display: inline-flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 11px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  font: 12.5px var(--mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one text field in the wizard. The design's field: `--panel-high` on
+   `--line-strong`, border to `--dim` while it is focused. */
+.wiz-field {
+  padding: 8px 11px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.wiz-field:focus {
+  border-color: var(--dim);
+}
+
+.wiz-field::placeholder {
+  color: var(--faint);
+}
+
+/* A summary row's value when it is not a path or a key. Mono is for paths,
+   keys, counts and machine names only (the design's type rules), so the
+   microphone and the model read in sans — and, like every other readout in a
+   row, this one gives way before the label does. */
+.set-row__control.wiz-value {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* The footer: 52px on `--panel` with a top hairline, the step count in mono at
+   the left and the actions at the right. */
+.onboarding__foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  height: 52px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.onboarding__count {
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+.onboarding__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* The wizard's own message slot, the third rendering of it. Between the
+   body and the footer, aligned with the content column, so a message never
+   moves the step it is about. */
+.onboarding__message {
+  flex: none;
+  padding: 0 44px 12px;
+}
+
+/* The base rule's own top margin would push it into the body. */
+.onboarding__message[data-open="yes"] {
+  margin: 0;
+}
+
+/* The four control kinds, verbatim from the mock. Labels are centred by the
+   one rule: inline-flex both axes, `line-height: 1`, and symmetric
+   vertical padding on every variant. The old half-pixel-more-above hand-tune
+   is gone — padding offsets the content box, so it fought the flex centring
+   it was meant to help. This overrides the design's type paragraph and
+   nothing else in it. */
+.wiz-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-ctl);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wiz-btn--primary {
+  padding: calc(7.4px - var(--ink-up-13)) 18px calc(7.4px + var(--ink-up-13));
+  background: var(--text);
+  border: 1px solid var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+/* Inert, not hidden and not removed: a Continue that vanishes teaches nobody
+   what the step is waiting for. The 120ms colour change is the shared control
+   transition at the top of this file, which is exactly the design's value for
+   "Continue becoming live". */
+.wiz-btn--primary[data-live="no"] {
+  background: none;
+  border-color: var(--line);
+  color: var(--faint);
+  font-weight: 400;
+  cursor: default;
+}
+
+.wiz-btn--second {
+  /* 12.5px face, so the 12.5 token — the base pair still sums the same. */
+  padding: calc(8.4px - var(--ink-up-125)) 14px calc(8.4px + var(--ink-up-125));
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.wiz-btn--second:hover {
+  background: var(--sel);
+}
+
+.wiz-btn--quiet {
+  padding: calc(7.4px - var(--ink-up-13)) 12px calc(7.4px + var(--ink-up-13));
+  background: none;
+  border: 1px solid transparent;
+  color: var(--muted);
+}
+
+.wiz-btn--quiet:hover {
+  background: var(--sel);
+  color: var(--text);
+}
+
+/* Back is absent on step one — there is nothing behind it. */
+.wiz-btn--quiet[data-open="no"] {
+  display: none;
+}
+
+/* The model guide inside the wizard is plain content under the step's own
+   title, not a panel on a panel: the repair panel's card chrome would read as
+   a second window in a 620px frame. */
+.onboarding .model-guide .settings {
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+.onboarding .model-guide p.muted,
+.onboarding .settings p.muted {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.onboarding .model-guide p.muted:last-child {
+  margin-bottom: 0;
+}
+
+.onboarding code,
+.model-guide code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.model-guide[data-open="no"],
+#wiz-model-ready[data-open="no"] {
+  display: none;
+}
+
+/* Motion, as the design draws it: a step advance crossfades over 200ms with a
+   6px slide in
+   the direction of travel, and the footer count moves with it. `display` is
+   what swaps the steps, so it is a keyframe on the one that appears rather
+   than a transition on the pair — the settings-tab arrangement. */
+@keyframes wiz-forward {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+}
+
+@keyframes wiz-back {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+}
+
+.onboarding[data-travel="forward"] .wiz[data-current="yes"],
+.onboarding[data-travel="forward"] .onboarding__count.is-moving {
+  animation: wiz-forward 200ms ease-out;
+}
+
+.onboarding[data-travel="back"] .wiz[data-current="yes"],
+.onboarding[data-travel="back"] .onboarding__count.is-moving {
+  animation: wiz-back 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The design's rule: keep the crossfade, drop the movement. */
+  .onboarding[data-travel="forward"] .wiz[data-current="yes"],
+  .onboarding[data-travel="forward"] .onboarding__count.is-moving,
+  .onboarding[data-travel="back"] .wiz[data-current="yes"],
+  .onboarding[data-travel="back"] .onboarding__count.is-moving {
+    animation-name: appear;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Settings — the design draws this screen in full                           */
+/*                                                                           */
+/* The whole surface is one grammar, and it is worth stating once: a section  */
+/* is a 9.5px uppercase `--faint` label over a card on `--bg` with a 1px      */
+/* `--line` and radius 12; a row inside it is `11px 14px`, a 13px `--text`    */
+/* label, an optional 11.5px `--dim` explanation under it, and the control    */
+/* pushed right with `margin-left: auto`. Rows are separated by a hairline    */
+/* and the last one has none.                                                */
+/*                                                                           */
+/* The hairline is a `border-top` on every row but the first *in its card*,   */
+/* not a `border-bottom` with a `:last-child` exception: a card here can hold */
+/* a rendered `<ul>` plus a static row after it, and `:last-child` cannot see */
+/* across that boundary — it would leave a doubled line on the card's own     */
+/* bottom edge. A row that is `display: none` (the capture question) carries  */
+/* no border either way, which is the other reason the rule sits on the       */
+/* rows.                                                                     */
+/*                                                                           */
+/* There is no Save, OK or Cancel: every change applies the moment it is      */
+/* made, and the header says so once.                                        */
+/* ------------------------------------------------------------------------- */
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 49px, the same header the transcript pane has, so the hairline runs
+   straight across from the sidebar's own. */
+.settings-pane__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 49px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-pane__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+/* Said once, here, and nowhere else. */
+.settings-pane__note {
+  margin-left: auto;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+.settings-pane__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* One tab's sections. The crossfade is the design's 180ms with a 4px rise;
+   `display` is what swaps them, so it is a keyframe on the one that appears
+   rather than a transition on the pair. */
+.settings-tab {
+  display: none;
+}
+
+.settings-pane[data-tab="general"] .settings-tab[data-tab="general"],
+.settings-pane[data-tab="recording"] .settings-tab[data-tab="recording"],
+.settings-pane[data-tab="transcription"] .settings-tab[data-tab="transcription"],
+.settings-pane[data-tab="overlay"] .settings-tab[data-tab="overlay"],
+.settings-pane[data-tab="about"] .settings-tab[data-tab="about"] {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.set-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.set-section__label {
+  padding-left: 4px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* The prose that belongs to a whole section rather than to one row. */
+.set-section__note {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.set-section__note code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.set-card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.set-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.set-card > .set-row:first-child,
+.set-card > .set-list > .set-row:first-child {
+  border-top: 0;
+}
+
+.set-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.set-row__label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.set-row__note {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--dim);
+  text-wrap: pretty;
+}
+
+/* "The app cannot apply this to the running process." Grayscale at full text
+   brightness with the hairline doing the separating — never red, which in this
+   app means a live recording and a line that failed to transcribe. It is a
+   row-level explanation, exactly where the thing it is about is. */
+.set-row__warn {
+  display: none;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+.set-row__warn[data-open="yes"] {
+  display: block;
+}
+
+/* Mono is for paths, keys, counts and numeric values only. */
+.set-row__path,
+.set-row__value {
+  font: 11.5px var(--mono);
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.set-row__value {
+  color: var(--muted);
+}
+
+.set-row__control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* A row whose "control" is a readout rather than a control gives way instead:
+   a long device name shortens before it pushes the label out of the row. */
+.set-row__control.set-row__value {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+
+.set-row__glyph {
+  margin-left: auto;
+  color: var(--dim);
+}
+
+/* The one thing awaiting an answer takes the brighter edge (`--line-strong`)
+   and the raised fill, and it stays a row: a rebind is answered where it was
+   asked, never in a popup — a native dialog would take focus away from
+   whatever is being tested (invariant 2). */
+.set-row--ask {
+  display: none;
+  background: var(--panel-high);
+  border-top: 1px solid var(--line-strong);
+}
+
+.set-row--ask[data-open="yes"] {
+  display: flex;
+}
+
+.set-row--ask .set-row__label {
+  color: var(--warn);
+}
+
+/* A `.bin` that is not a usable model, with the validator's own words. Shown,
+   never hidden: the whole point is that a bad download explains itself. */
+.set-row--rejected .set-row__label {
+  color: var(--warn);
+}
+
+.set-row--rejected .set-row__note {
+  color: var(--muted);
+}
+
+/* A master toggle owns the rows under it, as the design draws it: with the
+   overlay off, its dock-corner and reveal-duration rows go faint and stop
+   taking input. **Never hidden** — a control that vanishes teaches nobody what
+   the switch above it does. The selects are really `disabled`; this only says
+   so, exactly like the capture rule below. */
+.set-row[data-subordinate][data-owned="no"] {
+  opacity: 0.45;
+}
+
+/* One question at a time: while the helper is listening for a key, everything
+   else in the view is inert. The controls are really disabled — this only says
+   so — and the row doing the asking stays at full brightness. */
+#pane-settings[data-capturing="yes"] .set-row:not(.set-row--ask),
+#pane-settings[data-capturing="yes"] .set-section__note {
+  opacity: 0.45;
+}
+
+/* Controls ---------------------------------------------------------------- */
+
+/* Toggle, 32×18. On: `--text` track, `--bg` knob at left 16. Off: `--sel`
+   track, `--line-strong` border, `--dim` knob at left 2. The input is the
+   track — `appearance: none` and nothing else — so it keeps its own keyboard
+   behaviour, its `:disabled` state and its checked-ness, which is the whole
+   contract the renderers drive it by. */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 32px;
+  height: 18px;
+}
+
+.toggle__box {
+  appearance: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--sel);
+  cursor: pointer;
+  /* 140ms on the track, 180ms on the knob below: the design's own split. */
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+/* 3px, not the mock's literal 2px: the mock positions its knob inside the
+   track's border (content-box markup), while this knob is absolutely
+   positioned against `.toggle`'s outer edge — and this app is border-box. A
+   12px knob in the 18px track centres at (18 − 12) / 2 = 3 exactly; the old
+   `top/left: 2px` had the knob riding 1px high and 1px left in every state
+   (2.5 device px of gap asymmetry at 125% DPI, which reads as a visibly
+   misaligned pill). Checked travel is unchanged at 14px, which is
+   now mirror-perfect: off 3px from the left edge, on 3px from the right. */
+.toggle__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--dim);
+  pointer-events: none;
+  transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
+    background-color 140ms ease-out;
+}
+
+.toggle__box:checked {
+  background: var(--text);
+  border-color: var(--text);
+}
+
+.toggle__box:checked + .toggle__knob {
+  background: var(--bg);
+  transform: translateX(14px);
+}
+
+.toggle__box:focus-visible {
+  outline: 1px solid var(--dim);
+  outline-offset: 2px;
+}
+
+.toggle__box:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.toggle__box:disabled + .toggle__knob {
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle__knob {
+    transition: background-color 140ms ease-out;
+  }
+}
+
+/* Select: `--panel-high` on `--line-strong`, radius `--radius-ctl`, 12.5px
+   value, a 3.5px `--dim` caret. The box is the plain one — what sits in it
+   is a `.drop__button` wearing `.pick__select` rather than the <select>
+   itself, and the list it opens is this window's own glass. */
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  max-width: 260px;
+  padding: 4px 9px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+}
+
+.pick:focus-within {
+  border-color: var(--dim);
+}
+
+.pick__select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  appearance: none;
+  cursor: pointer;
+  /* Stripping border and background is not enough: WebView2 still paints its
+     own focus ring *inside* the `.pick` box, which reads as a double border
+     when it is seen on screen. Suppressed only because the wrapper
+     already carries a focus state — `.pick:focus-within` above brightens the
+     hairline to `--dim`, so a keyboard user never loses their place. */
+  outline: none;
+  /* A microphone name can be longer than the box; it shortens rather than
+     spilling past the hairline. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick__select:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+
+/* The same fallback the other two keep: nothing opens this list any
+   more, and a page whose script never ran would be glad of it. */
+.pick__select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.pick__caret {
+  width: 0;
+  height: 0;
+  flex: none;
+  border-top: 3.5px solid var(--dim);
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+}
+
+/* A key is shown as a cap, never as an editable field: nobody types virtual
+   key codes. Mono, because it is a key. */
+.keycap {
+  flex: none;
+  padding: 3px 8px;
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  font: 11.5px var(--mono);
+  color: var(--text);
+}
+
+/* The slot while the helper is listening for this one: dashed, empty, and
+   plainly waiting. */
+.keycap[data-awaiting="yes"] {
+  background: none;
+  border-style: dashed;
+  color: var(--dim);
+}
+
+/* A text action: `--dim` to `--text`, no box and no underline. */
+.set-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.set-action:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* The wizard's Change and every Settings text-action: inert, still a control.
+   Same mark as `.action:disabled` — see the note there. */
+.set-action:disabled {
+  cursor: default;
+  color: var(--faint);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* The secondary button: `--panel-high` on `--line-strong`, `--sel` on hover.
+   Centred by the one rule, not by a hand-tuned padding. */
+.set-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: calc(4px - var(--ink-up-125)) 12px calc(4px + var(--ink-up-125));
+  background: var(--panel-high);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.set-button:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+.set-button:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+
+/* A state, said in the row's control group: "in use", "will be used". */
+.set-mark {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+/* A model being loaded right now. Quiet mono, like every other readout
+   that reports a fact rather than offering a control — there is no spinner and
+   no progress bar, because the backend has no honest number to give one and
+   the whole state is a few seconds long. */
+.set-loading {
+  flex: none;
+  font: 11.5px var(--mono);
+  color: var(--muted);
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Search                                                                    */
+/*                                                                           */
+/* One field, two behaviours, and the scope is implied by whether a note is   */
+/* open: `#view-ready[data-searching]` is `no` / `note` / `library` and every */
+/* appearance below hangs off it. `main.js` names the state; the swapping is  */
+/* CSS's, and nothing here uses the `hidden` attribute.                       */
+/* ------------------------------------------------------------------------- */
+
+/* The field, per the mock: magnifier, placeholder, `--bg` on a 1px `--line`,
+   radius `--radius-ctl`. The border brightens to `--dim` while it is focused
+   or holds a term — the design's "focused field border" value. */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 9px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  color: var(--faint);
+  transition: border-color 120ms ease-out, color 120ms ease-out;
+}
+
+.search:focus-within,
+#view-ready[data-searching="note"] .search,
+#view-ready[data-searching="library"] .search {
+  border-color: var(--dim);
+  color: var(--dim);
+}
+
+.search__icon {
+  flex: none;
+}
+
+.search__input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.search__input::placeholder {
+  color: var(--faint);
+}
+
+/* The keycap at the field's right edge, only while there is a term to clear.
+   It is the hint *and* the control: `esc` does this, and so does clicking it.
+
+   No `line-height: 1`, for `.wiz-path__value`'s reason: this control
+   draws no box of its own, but it is flex-centred against `.search`'s hairline,
+   and a forced 11px line box under a 12.7px mono glyph box put the word ~0.57px
+   above that border's centre. The `font` shorthand's `normal` centres it. */
+.search__esc {
+  display: none;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 11px var(--mono);
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.search__esc[data-open="yes"] {
+  display: inline;
+}
+
+.search__esc:hover {
+  color: var(--text);
+}
+
+/* Inside `.search`, so the UA ring would paint a second border within the
+   field's own hairline (the `.pick__select` defect). Suppressed —
+   but this control gets its *own* focus state rather than leaning on
+   `.search:focus-within`, which cannot say whether the field or this keycap
+   holds focus. Brightening to `--text` is the same cue its hover uses, which
+   is how every other quiet control in this file answers the keyboard. */
+.search__esc:focus-visible {
+  outline: none;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The sort control gives up its label to make room for the field.
+   The glyph is the button the design draws; the control lies over it,
+   invisible, filling the box. A <select> is as wide as its longest option,
+   which is why it could not simply be narrowed — and the thing
+   lying there is a `.drop__button` wearing this class, so the same overlay
+   rule dresses it and the list it opens is `#drop-menu`. */
+.sort {
+  position: relative;
+  flex: none;
+  width: 30px;
+  justify-content: center;
+  padding: 0;
+}
+
+.sort__select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+}
+
+/* The tree's heading while a term is active: "6 matches · 3 notes", in the
+   uppercase label's place and its type. */
+.tree__found {
+  display: none;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tree__found[data-open="yes"] {
+  display: inline;
+}
+
+#view-ready[data-searching="note"] .tree__label,
+#view-ready[data-searching="library"] .tree__label {
+  display: none;
+}
+
+/* -- The pane header ------------------------------------------------------ */
+
+/* Everything search adds is absent until it is asked for. */
+#search-title,
+#pane-matches,
+#search-meta,
+#search-exit,
+#search-sort {
+  display: none;
+}
+
+/* The note's own meta belongs to the whole note, and while a term is active the
+   pane is not showing the whole note. Both scopes, one rule. */
+#view-ready[data-searching="note"] #line-count,
+#view-ready[data-searching="note"] #line-time,
+#view-ready[data-searching="library"] #line-count,
+#view-ready[data-searching="library"] #line-time {
+  display: none;
+}
+
+/* Note scope (D): the breadcrumb is unchanged, the line count gives way to
+   "N matching lines", and the header's actions give way to "Show whole note" —
+   they come back the moment the term does not exist any more. */
+#view-ready[data-searching="note"] .pane__actions .action:not(#search-exit) {
+  display: none;
+}
+
+#view-ready[data-searching="note"] #pane-matches {
+  display: inline;
+}
+
+#view-ready[data-searching="note"] #search-exit {
+  display: inline-flex;
+}
+
+/* Library scope (E): there is no note, so the breadcrumb is replaced by what
+   the pane is listing, and the sort the list follows is echoed at the right as
+   text — a readout, not a second control. */
+#view-ready[data-searching="library"] #note-project,
+#view-ready[data-searching="library"] .crumb__sep,
+#view-ready[data-searching="library"] #note-title,
+#view-ready[data-searching="library"] .pane__actions .action {
+  display: none;
+}
+
+#view-ready[data-searching="library"] #search-title,
+#view-ready[data-searching="library"] #search-meta {
+  display: inline;
+}
+
+#view-ready[data-searching="library"] #search-sort {
+  display: inline-flex;
+}
+
+/* The meta slot is hidden with the breadcrumb when no note is open; in library
+   scope it is carrying the counts, so it comes back. */
+#view-ready[data-searching="library"] .pane__meta {
+  display: flex;
+}
+
+/* What the pane is listing, at the breadcrumb's size and full brightness. */
+.crumb--found {
+  flex: 0 1 auto;
+  color: var(--text);
+}
+
+/* The sort echo. `--dim`, like the design's, and deliberately inert: the sort
+   itself is the control in the sidebar, and two of them would be two answers. */
+.pane__echo {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+/* -- The card ------------------------------------------------------------- */
+
+/* Library scope replaces both of the pane's two bodies with the results list.
+   Two ids, so this beats the `data-empty` rule that hides the transcript. */
+#view-ready[data-searching="library"] #line-list,
+#view-ready[data-searching="library"] #note-empty {
+  display: none;
+}
+
+#search-results {
+  display: none;
+}
+
+#view-ready[data-searching="library"] #search-results {
+  display: block;
+}
+
+/* Three ids, so the pane takeover still wins: a window that cannot see the
+   keyboard has nothing to say about search results. */
+#view-ready #pane-session[data-condition="hotkeyDead"] #search-results {
+  display: none;
+}
+
+/* One result: name · project · "N matches · when", then the first matching
+   line as a one-line ellipsised preview. */
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+
+.result:last-child {
+  border-bottom: 0;
+}
+
+.result:hover,
+.result:focus-visible {
+  background: var(--sel);
+  outline: none;
+}
+
+.result__head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.result__name {
+  font-size: 13.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result__project {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+.result__meta {
+  margin-left: auto;
+  flex: none;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+.result__preview {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The match itself: a `--sel` block behind the text, never a colour (the
+   design says so twice). It is built from split text nodes in `main.js` —
+   there is no HTML string assembly anywhere near line text. */
+.mark {
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: var(--sel);
+  color: var(--text);
+}
+
+/* Reordering a filtered list would drop a row between neighbours it cannot
+   see, so the grip is absent while a term is active — a deliberate
+   deviation from the mock's "the rows are the same ones". `visibility`, not
+   `display`: the column keeps its width, so nothing shifts sideways when the
+   search ends. The row is not `draggable` either — that half is `main.js`'s. */
+#view-ready[data-searching="note"] .line__grip {
+  visibility: hidden;
+}
+
+/* -- The footer ----------------------------------------------------------- */
+
+.foot__found {
+  display: none;
+}
+
+.foot__found[data-open="yes"] {
+  display: inline;
+}
+
+/* -- Motion --------------------------------------------------------------- */
+
+/* "Search filter — 180ms ease-out, crossfade the tree, do not rebuild it"
+   (the design's motion table). Opacity only, so `prefers-reduced-motion`
+   needs no override: `appear` is the movement-free keyframe the rest of the
+   window already uses. The attribute is set by `main.js` when the result set
+   changes, and re-armed by removing it and forcing a reflow — a one-shot
+   animation with no fill, so the list ends at its own opacity whatever
+   happens to the attribute.
+
+   On record as a deviation: this fades the *new* set in rather than
+   cross-dissolving two of them. There is one list in the DOM and rebuilding it
+   is what every renderer in this window does; a true two-layer crossfade would
+   mean holding a stale copy of the tree on screen, which is the one thing a
+   filtered list must not do. */
+#draft-list[data-search-fade="yes"],
+#line-list[data-search-fade="yes"],
+#search-results[data-search-fade="yes"] {
+  animation: appear 180ms ease-out;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Selection and the in-row delete confirm                                   */
+/*                                                                           */
+/* Two states, one row grammar, and every                                     */
+/* appearance change hangs off an attribute main.js sets: `data-selected` on  */
+/* the row, `data-confirm` on the armed one, `data-selection` on the pane.    */
+/* Nothing here uses the `hidden` attribute — every rule sets `display`,      */
+/* which beats the UA sheet — and nothing branches on the                     */
+/* theme: both palettes define the same token names.                          */
+/*                                                                           */
+/* The row's `--sel` fill and its 2px `--line-strong` edge live up with the   */
+/* rest of `.line`, where the transparent edge every unselected row carries   */
+/* is declared; this section is the chrome around them.                      */
+/* ------------------------------------------------------------------------- */
+
+/* -- The header's selection toolbar --------------------------------------- */
+
+/* The count, in the breadcrumb's place and at its size. */
+.crumb--sel {
+  flex: none;
+  color: var(--text);
+}
+
+/* `esc to clear` — mono, `--faint`, a readout of the key rather than a
+   control (mock C). It is not a keycap: the search field's `esc` is a button
+   that does something, and this one is only the sentence. */
+.pane__esc {
+  flex: none;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+.pane__sel {
+  display: none;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* Both halves are absent until there is a set, and the note's own header is
+   absent while there is one. Hiding `.pane__actions` wholesale rather than
+   its children is deliberate: `display: none` on the group takes the subtree
+   with it whatever search's own rules say about the buttons inside, so the
+   two header swaps cannot end up fighting over one control. */
+#sel-count,
+#sel-hint {
+  display: none;
+}
+
+#pane-session[data-selection="some"] #sel-count,
+#pane-session[data-selection="some"] #sel-hint {
+  display: inline;
+}
+
+#pane-session[data-selection="some"] .pane__sel {
+  display: flex;
+}
+
+#pane-session[data-selection="some"] .pane__actions,
+#pane-session[data-selection="some"] .crumb--project,
+#pane-session[data-selection="some"] .crumb--note,
+#pane-session[data-selection="some"] .crumb__sep,
+#pane-session[data-selection="some"] .pane__meta {
+  display: none;
+}
+
+/* The only red in the header, and only ever on this one control — a live
+   recording and a line that failed to transcribe keep the other two meanings
+   (the design's colour rules). Disabled it goes back to `--faint`
+   like every other inert control here: a red control that refuses to act
+   would be shouting about something it will not do. */
+.action--bad:not(:disabled) {
+  color: var(--bad);
+}
+
+.action--bad:hover:not(:disabled) {
+  color: var(--bad);
+}
+
+/* -- The footer's count ---------------------------------------------------- */
+
+.foot__sel {
+  display: none;
+}
+
+.foot__sel[data-open="yes"] {
+  display: inline;
+  color: var(--dim);
+}
+
+/* -- The in-row delete confirm (design B) --------------------------------- */
+
+/* The row itself becomes the question: `--panel-high`, a `--line-strong`
+   hairline above and below to lift it out of the list, and nothing else in it
+   interactive. It replaces the row's grid entirely — there is no timestamp
+   column in the drawn confirm, because the row is no longer reading as a
+   line. Its height may grow, which is why the whole thing appears over 180ms
+   ("Anything appearing or leaving"). */
+.line--confirm {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 18px;
+  background: var(--panel-high);
+  border-left: 2px solid transparent;
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  animation: rise 180ms ease-out;
+}
+
+/* A pointed-at confirm must not take the row hover fill: it is the one thing
+   on screen awaiting an answer, and it already has its own surface. */
+.line--confirm:hover {
+  background: var(--panel-high);
+}
+
+.confirm__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* `--warn`: grayscale at full text brightness, the way everything the app
+   asks about reads. The red in this row is the button and nothing else. */
+.confirm__title {
+  font-size: 13px;
+  color: var(--warn);
+}
+
+.confirm__note {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* Quoted so there is no doubt which line is going, and one line only — a
+   confirm that reflows the transcript to fit a long finding is a worse
+   question than a short one. The whole line stays reachable as the title. */
+.confirm__quote {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm__sep,
+.confirm__fact {
+  flex: none;
+}
+
+.confirm__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* The only red *outline* in the app (design B says so). Outline, never a
+   fill: the destructive answer is offered, not urged. */
+.confirm__go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(4.5px - var(--ink-up-125)) 13px
+    calc(4.5px + var(--ink-up-125));
+  background: transparent;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-ctl);
+  color: var(--bad);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out,
+    border-color 120ms ease-out;
+}
+
+.confirm__go:hover {
+  background: var(--bad);
+  color: var(--bg);
+}
+
+/* Quiet, and the same shape, so the two answers are the same size target and
+   only their treatment says which is which. */
+.confirm__quiet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(4.5px - var(--ink-up-125)) 11px
+    calc(4.5px + var(--ink-up-125));
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-ctl);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.confirm__quiet:hover {
+  background: var(--sel);
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the crossfade, drop the movement — the design's own rule. */
+  .line--confirm {
+    animation-name: appear;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Renaming a note or a project                                              */
+/*                                                                           */
+/* One field grammar in four places — a tree note row, a project group row,   */
+/* and each of the two breadcrumb crumbs — so everything                      */
+/* here is written against `.rename` and `.pencil` rather than against the    */
+/* surface it happens to be in.                                              */
+/*                                                                           */
+/* The pencil is `--dim` and revealed by hover or keyboard focus, like every  */
+/* other row control in this file; the field is `--bg` with a 1px `--dim`     */
+/* border at the type and position the name had, and the hint sits under it   */
+/* in mono `--faint`. `display` rules throughout, never the `hidden`          */
+/* attribute.                                                                */
+/* ------------------------------------------------------------------------- */
+
+.pencil {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  line-height: 1;
+  cursor: pointer;
+  transition: opacity 90ms ease-out, color 120ms ease-out;
+}
+
+.pencil:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* -- The two breadcrumb slots --------------------------------------------- */
+
+/* Crumb and pencil in one box, so the pointer never crosses the header's own
+   9px gap on its way from the name to the control that renames it. */
+.crumb__slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.crumb__slot--note {
+  flex: 0 2 auto;
+}
+
+.crumb__pencil {
+  opacity: 0;
+  /* A faded-out control is not a click target until it is on screen — the
+     same rule the transcript's row tools follow. */
+  pointer-events: none;
+}
+
+.crumb__slot:hover .crumb__pencil,
+.crumb__slot:focus-within .crumb__pencil {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Hidden outright while a recording is live (an affordance that
+   exists only to explain a refusal is the menu lying), and when there is no
+   bound note or no project to rename. main.js decides; this draws. */
+.crumb__pencil[data-show="no"] {
+  display: none;
+}
+
+/* While the field is open it *is* the crumb: the name and its pencil step
+   aside rather than sitting beside a field showing the same words. */
+.crumb__slot[data-renaming="yes"] > .crumb,
+.crumb__slot[data-renaming="yes"] > .crumb__pencil {
+  display: none;
+}
+
+/* The selection toolbar and library-scope search both take the breadcrumb
+   away; the pencils go with it, or a control would be left pointing at a name
+   that is no longer on screen. */
+#pane-session[data-selection="some"] .crumb__pencil,
+#view-ready[data-searching="library"] .crumb__pencil {
+  display: none;
+}
+
+/* -- The field ------------------------------------------------------------ */
+
+.rename {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rename__input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  background: var(--bg);
+  border: 1px solid var(--dim);
+  border-radius: 7px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.rename__input:focus {
+  outline: none;
+  border-color: var(--line-strong);
+}
+
+/* The breadcrumb's field is the crumb's type, not the tree's. */
+.crumb__slot .rename__input {
+  font-size: 13px;
+}
+
+.crumb__slot--note .rename__input {
+  font-family: var(--mono);
+}
+
+/* `⏎ rename · esc cancel`, under the field, mono `--faint` (design F). */
+.rename__hint {
+  font: 11px var(--mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* In the tree the hint belongs to the row below the field, indented to the
+   name's own left edge the way the design draws it. */
+.note .rename__hint,
+.group__row .rename__hint {
+  padding-top: 2px;
+}
+
+/* -- In the tree ---------------------------------------------------------- */
+
+/* The group row's pencil is revealed by the same hover as the `+` and the
+   `edit` beside it — one affordance rule for the whole row. */
+.group__row .pencil {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.group__row:hover .pencil,
+.group__row:focus-within .pencil {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The note row's pencil rides `.note__tools`, which is already hidden until
+   the row is pointed at or tabbed into, so it needs no reveal of its own. */
+
+/* A row mid-rename is the field, in the button's place and at its size: the
+   name is replaced where it stood, which is the whole of "in place". */
+.note__open--renaming {
+  align-items: flex-start;
+  cursor: default;
+}
+
+.group__row .rename {
+  flex: 1 1 auto;
+}
+
+/* -- The footer's two readouts -------------------------------------------- */
+
+/* "renaming note · file renamed to match". It takes the path's place: one
+   left slot, one statement about what is happening. */
+.foot__rename {
+  display: none;
+}
+
+.foot__rename[data-open="yes"] {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foot__rename[data-open="yes"] ~ .foot__path {
+  display: none;
+}
+
+.foot__renaming {
+  display: none;
+}
+
+.foot__renaming[data-open="yes"] {
+  display: inline;
+  color: var(--faint);
+}
+
+/* -- Removing a project --------------------------------------------------- */
+
+/* A text action, two-step in place, and deliberately quiet: what it does is
+   small — it removes an entry from a config file — and the copy beside it is
+   what carries the weight. */
+.projects__danger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.projects__danger .linkish {
+  flex: none;
+  color: var(--muted);
+}
+
+.projects__danger .linkish:hover:not(:disabled) {
+  color: var(--bad);
+}
+
+/* Primed, it says so and stops being quiet — the `note__discard` precedent,
+   which is the only two-step confirm shape this app has. */
+.projects__danger .linkish[data-primed="yes"] {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.projects__note {
+  font-size: 11.5px;
+  color: var(--faint);
+}

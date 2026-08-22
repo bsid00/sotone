@@ -1,0 +1,221 @@
+# Sotone release.
+#
+# Builds the Windows NSIS installer, checksums it, keeps the pair as a workflow
+# artifact and, when the trigger was a `v*` tag, publishes both files as a
+# GitHub pre-release for that tag. Nothing is signed: the build is unsigned
+# and the release notes say so. The only credential involved is the workflow's
+# own automatic token, which is why `permissions` grants `contents: write`;
+# no `secrets.*` expression appears anywhere below.
+#
+# Linux/macOS artifacts (deb/AppImage/dmg) are deliberately out of scope. Two
+# reasons: the app crate compiles on Linux and macOS in ci.yml but has never
+# been run on either, and `tauri.conf.json`'s
+# beforeBuildCommand is a PowerShell invocation of
+# tools/bundle/prepare_sidecar.ps1 — fine while only Windows bundles, but a
+# future Linux/macOS bundle job needs a platform-conf override
+# (`tauri.linux.conf.json` / `tauri.macos.conf.json`) pointing at
+# tools/bundle/prepare_sidecar.sh instead.
+#
+# Runner image pinned for the same reason as ci.yml: `windows-latest` is
+# migrating to WS2025 + VS2026 in 2026 and `windows-2022` is what the project is
+# verified against. Actions pinned by tag; SHA-pinning is a future hardening
+# pass.
+#
+# Written before the repo had a git remote; the v0.1.0 tag is its first real run.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# `write` is what `gh release create` needs. Everything before that step only
+# reads the checkout.
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    name: windows installer / vulkan
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      # The Visual Studio generator cannot configure ggml's nested
+      # `vulkan-shaders-gen`; Ninja can. Same trap as ci.yml.
+      CMAKE_GENERATOR: Ninja
+    steps:
+      # The bundle lands under the default `target/` here. A developer machine
+      # may redirect the cargo target dir out of the tree (Windows MAX_PATH),
+      # but that lives in a gitignored `.cargo/config.toml` and does not travel —
+      # so the paths below are the CI truth, not a machine-local guess.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cl.exe` is not on PATH on the Windows images. Stale action, still the
+      # standard one — see the same note in ci.yml.
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Build-time only (headers, loader, shader toolchain). Same shape and same
+      # reasoning as ci.yml: ggml's Vulkan backend hard-requires *glslc* —
+      # `ggml/src/ggml-vulkan/CMakeLists.txt` line 9, read off whisper-rs-sys's
+      # vendored whisper.cpp, is `find_package(Vulkan COMPONENTS glslc
+      # REQUIRED)`. glslc comes from shaderc, not from Glslang (which ships
+      # glslangValidator), which is why the from-source component actions were
+      # rejected in favour of the official LunarG SDK. 1.4.350.0 is the SDK
+      # version this project is built against; URL verified 2026-08-16
+      # (HTTP 200, ~309 MB). Unobserved here: the silent installer's behaviour
+      # on a hosted runner — the flags are LunarG's documented unattended ones,
+      # widely used in public CI, never run by this repo, hence the glslc.exe
+      # check.
+      - name: Cache the Vulkan SDK installer
+        uses: actions/cache@v4
+        with:
+          # The downloaded installer only, never the installed SDK: a full
+          # install is GB-scale and the repo-wide cache cap is 10 GB.
+          path: ${{ runner.temp }}\vulkansdk-windows-X64-1.4.350.0.exe
+          key: vulkan-sdk-installer-1.4.350.0
+
+      - name: Install the Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\vulkansdk-windows-X64-1.4.350.0.exe"
+          if (-not (Test-Path -LiteralPath $installer)) {
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://sdk.lunarg.com/sdk/download/1.4.350.0/windows/vulkansdk-windows-X64-1.4.350.0.exe' -OutFile $installer
+          }
+          # The install itself runs every time (minutes, deterministic); only
+          # the download is cached.
+          Start-Process -FilePath $installer -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install','--root','C:\VulkanSDK\1.4.350.0' -Wait
+          $glslc = 'C:\VulkanSDK\1.4.350.0\Bin\glslc.exe'
+          if (-not (Test-Path -LiteralPath $glslc)) {
+            Write-Host "::error::$glslc is missing after the silent install -- ggml's find_package(Vulkan COMPONENTS glslc REQUIRED) cannot succeed, so stop here rather than failing opaquely inside whisper-rs-sys"
+            exit 1
+          }
+          "VULKAN_SDK=C:\VulkanSDK\1.4.350.0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "C:\VulkanSDK\1.4.350.0\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+
+      # tauri-cli is needed only here (CI proper never bundles). binstall pulls
+      # the prebuilt binary instead of compiling the CLI from source, which is
+      # several minutes of runner time.
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      # Pinned: a bundler that changes under us changes the installer.
+      # Fallback if binstall's artifact lookup ever fails on the runner:
+      #   cargo install tauri-cli --version 2.11.4 --locked
+      - name: Install tauri-cli 2.11.4
+        run: cargo binstall tauri-cli@2.11.4 --no-confirm
+
+      # No explicit sidecar step here, unlike ci.yml: `tauri.conf.json`'s
+      # build.beforeBuildCommand runs tools/bundle/prepare_sidecar.ps1 itself,
+      # so the hook is built and staged as part of this command. The
+      # verification below is what proves it happened.
+      - name: cargo tauri build -f vulkan
+        run: cargo tauri build -f vulkan
+
+      # Mirrors prepare_sidecar.ps1's own reasoning, and repeats it because this
+      # is the artifact that reaches users: the hook links no transcription
+      # backend by design, so a sidecar over 5 MB means whisper.cpp
+      # is back inside it and the installer must not ship. The floor catches the
+      # other direction — truncated bytes are as wrong as bloated ones.
+      - name: Verify the staged sidecar
+        shell: pwsh
+        run: |
+          $stageDir = 'src-tauri/binaries'
+          $staged = @(Get-ChildItem -Path $stageDir -Filter 'sotone-hook-*.exe' -File -ErrorAction SilentlyContinue)
+          if ($staged.Count -ne 1) {
+            Write-Host "::error::expected exactly one staged sidecar in $stageDir, found $($staged.Count)"
+            exit 1
+          }
+          $size = $staged[0].Length
+          Write-Host ("sidecar: {0} ({1:N0} bytes, {2:N2} MB)" -f $staged[0].Name, $size, ($size / 1MB))
+          if ($size -lt 64KB) {
+            Write-Host "::error::$($staged[0].Name) is only $size bytes, which cannot be a real helper"
+            exit 1
+          }
+          if ($size -gt 5MB) {
+            Write-Host "::error::$($staged[0].Name) is over the 5 MB ceiling -- the hook's backend-free feature gating has regressed and whisper.cpp is back inside it"
+            exit 1
+          }
+
+      # SHA256SUMS.txt sits next to the installer so the pair travels together in
+      # one artifact. Format is the familiar `<hash> *<filename>` so `sha256sum
+      # -c` and `Get-FileHash` comparisons both read it without ceremony.
+      - name: Checksum the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $dir = 'target/release/bundle/nsis'
+          $found = @(Get-ChildItem -Path $dir -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) {
+            Write-Host "::error::expected exactly one NSIS installer in $dir, found $($found.Count)"
+            exit 1
+          }
+          $installer = $found[0]
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLower()
+          "$hash *$($installer.Name)" | Set-Content -LiteralPath (Join-Path $dir 'SHA256SUMS.txt') -Encoding ascii
+          Write-Host ("{0}  {1} ({2:N1} MB)" -f $hash, $installer.Name, ($installer.Length / 1MB))
+          # The version comes from tauri.conf.json, which is what the bundler
+          # itself named the installer after -- never a hardcoded string.
+          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            Write-Host '::error::could not read version from src-tauri/tauri.conf.json'
+            exit 1
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      # One artifact holding both files, for every run including manual ones.
+      # On a tag run the same two files also go to the release below.
+      - name: Upload the installer and its checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: sotone-${{ steps.installer.outputs.version }}-windows-x64-nsis
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/SHA256SUMS.txt
+          if-no-files-found: error
+
+      # A tag push becomes a release; a manual dispatch stops at the artifact
+      # above. Marked pre-release because the installer is unsigned and the
+      # app has been used by one person on one machine. The notes are written
+      # here, not generated from commits, so they say what a downloader needs
+      # to know. The tag must match the version the bundler used, or the
+      # release would be named after one version and contain another.
+      - name: Create the GitHub pre-release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.installer.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match the version in src-tauri/tauri.conf.json ($VERSION)"
+            exit 1
+          fi
+          cat > release-notes.md <<EOF
+          Windows 10 and 11, 64-bit. Download the \`-setup.exe\` file and run it. The installer includes the WebView2 runtime, so nothing else needs to be installed first.
+
+          This build is not code-signed. Windows SmartScreen will warn about an unknown publisher: choose "More info", then "Run anyway". To check that the file you downloaded is the one this workflow built, compare its SHA-256 with \`SHA256SUMS.txt\`.
+
+          Speech models are not included. The setup wizard on first start says where to get one and where to put it.
+
+          The README explains what Sotone does, how to use it and what is not done yet.
+          EOF
+          gh release create "$TAG" \
+            --prerelease \
+            --title "Sotone $VERSION" \
+            --notes-file release-notes.md \
+            target/release/bundle/nsis/*-setup.exe \
+            target/release/bundle/nsis/SHA256SUMS.txt

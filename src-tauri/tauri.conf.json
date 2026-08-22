@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sotone",
+  "version": "0.1.0",
+  "identifier": "app.sotone.dictation",
+  "build": {
+    "frontendDist": "../ui",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/bundle/prepare_sidecar.ps1"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sotone",
+        "width": 900,
+        "height": 640,
+        "minWidth": 620,
+        "minHeight": 440,
+        "resizable": true,
+        "decorations": false,
+        "dragDropEnabled": false
+      },
+      {
+        "label": "overlay",
+        "title": "Sotone overlay",
+        "url": "overlay.html",
+        "width": 81,
+        "height": 74,
+        "resizable": false,
+        "decorations": false,
+        "shadow": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "visible": false,
+        "dragDropEnabled": false
+      },
+      {
+        "label": "traymenu",
+        "title": "Sotone tray menu",
+        "url": "tray.html",
+        "width": 260,
+        "height": 240,
+        "resizable": false,
+        "decorations": false,
+        "shadow": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["binaries/sotone-hook"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {}
+}

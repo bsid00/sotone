@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Sotone's three windows listen for Sotone's own events, and the main window draws its own caption (decorations are off, so minimize / maximize / close are ours to call). `core:default` includes core:event:default (allow-listen) and core:window:default (metadata getters plus internal_toggle_maximize, which is what a double-click on the drag region uses); app-defined commands are not ACL-gated, so the only additions here are the four the caption buttons and the title bar need: allow-start-dragging, allow-minimize, allow-toggle-maximize, allow-close. NOTHING granted in this file can activate, show, raise or focus a window — there is no allow-set-focus, no allow-show and no allow-set-always-on-top, and invariant 2 stays enforced by their absence, not by a comment (the tray menu IS focused when it opens, but by the Rust side's own carve-out in tray.rs, never from a page). The overlay and traymenu are listed because a missing grant does not fail to compile: listen() rejects at runtime and the page looks alive while never updating — which is exactly how the tray menu once shipped unable to open (traymenu was missing from this list, so its page never heard sotone://tray-open).",
+  "windows": ["main", "overlay", "traymenu"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
+}

@@ -1,0 +1,70 @@
+[package]
+name = "sotone-core"
+description = "Local logic for Sotone: audio, hotkey, whisper and draft store. No Tauri, no window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Deliberately no `default` backend: the choice is always explicit at the
+# command line, so nobody ships a CPU build believing it is a GPU build.
+#
+# `whisper` gates the whisper-rs dependency itself, one layer under the three
+# backends, so that a consumer with no use for transcription can build
+# backend-free: sotone-hook only wants the bindings vocabulary and the hook, and
+# without this it dragged whisper.cpp's static C libraries (~50 MB) into a
+# binary that never transcribes anything. Every backend implies it; it is never
+# meant to be spelled on its own, and lib.rs rejects that spelling.
+whisper = ["dep:whisper-rs"]
+vulkan = ["whisper", "whisper-rs/vulkan"]
+cpu = ["whisper", "whisper-rs/openblas", "whisper-rs/openmp"]
+metal = ["whisper", "whisper-rs/metal", "whisper-rs/coreml"]
+
+[dependencies]
+whisper-rs = { workspace = true, optional = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+toml_edit = { workspace = true }
+dirs = { workspace = true }
+cpal = { workspace = true }
+ringbuf = { workspace = true }
+rubato = { workspace = true }
+# Global input hook for push-to-talk. `listen` only, never `simulate`, and the
+# `unstable_grab` feature stays off — see the root Cargo.toml for why.
+rdev = { workspace = true }
+# Draft store: jsonl + meta.json, per-line wav, ulid ids, RFC3339 timestamps.
+serde = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
+chrono = { workspace = true }
+hound = { workspace = true }
+# External-edit guard on save: blake3 of exactly the bytes we last wrote, so a
+# save can tell "the file changed under us" from "we wrote this". blake3 is the
+# hash chosen for it. Default features (no rayon: the files are notes, and
+# a thread pool for hashing a few kilobytes would be a liability, not a win).
+blake3 = "1"
+
+# These two are the only examples that reach into `transcribe`/`session`, both of
+# which are `whisper`-gated. Declared here so a whisper-free `--examples` build
+# skips them with cargo's own "requires the features" line instead of failing on
+# an unresolved module. (`mic_probe`, `cue_probe` and `hotkey_probe` need no
+# section: they touch audio, cues and hotkeys only.)
+[[example]]
+name = "dictate"
+required-features = ["whisper"]
+
+[[example]]
+name = "transcribe_probe"
+required-features = ["whisper"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Dev-only: the probes need a subscriber before any `tracing` line — including
+# the whisper.cpp and ggml logs that whisper-rs's `tracing_backend` feature
+# routes into `tracing` — reaches a console. Those lines are the only place a
+# silent Vulkan-to-CPU fallback announces itself, so a probe without a
+# subscriber cannot answer the question it exists to answer. The app installs
+# its own subscriber; this is not a runtime dependency of the library.
+tracing-subscriber = { workspace = true }

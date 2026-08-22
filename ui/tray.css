@@ -1,0 +1,223 @@
+/* The tray menu — the same glass the in-page dropdowns wear, in a window of
+   its own. Every value here is the design mock's:
+   260px wide, 5px box padding, items 12.5px at 5px 10px on a 6px radius,
+   hover --sel, counts right in 11px mono --faint, sections 9.5px/600
+   uppercase, separators --glass-line inset 10px. No colour literal below —
+   tokens.css owns the palette. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  /* The window is exactly the menu; nothing scrolls, nothing overflows. */
+  overflow: hidden;
+  background: transparent;
+  font: 14px/1.5 var(--sans);
+  color: var(--text);
+  /* Nothing in a menu is selectable text. */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* The glass box. The window is sized to this element's height by the
+   measure-then-show handshake in tray.js, so it never scrolls. */
+.traymenu {
+  width: 260px;
+  padding: 5px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  /* 180ms from 0.98 anchored to the glyph's edge — bottom right, where the
+     icon is (the design's motion table). Replayed by tray.js on every open. */
+  transform-origin: bottom right;
+}
+
+.traymenu[data-motion="in"] {
+  animation: menu-in 180ms ease-out;
+}
+
+.traymenu[data-motion="out"] {
+  animation: menu-out 140ms ease-out forwards;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+/* The status row: the mini glyph and the one sentence of state. A readout,
+   not an action — no hover, no cursor change. */
+.tm-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The four bars, 11px tall — the logo at menu scale, drawn in divs exactly
+   as the pill draws its VU (no icon font, no image, invariant 3). */
+.tm-glyph {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 11px;
+  flex: none;
+}
+
+.tm-glyph i {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dim);
+}
+
+.tm-glyph i:nth-child(1) {
+  height: 5px;
+}
+.tm-glyph i:nth-child(2) {
+  height: 10px;
+}
+.tm-glyph i:nth-child(3) {
+  height: 7px;
+}
+.tm-glyph i:nth-child(4) {
+  height: 4px;
+}
+
+/* The glyph tells the same truth the icon does: red while recording, hollow
+   while Sotone cannot hear (driven by data-glyph from the same payload). */
+.traymenu[data-glyph="live"] .tm-glyph i {
+  background: var(--live);
+}
+
+.traymenu[data-glyph="hollow"] .tm-glyph i {
+  background: transparent;
+  border: 1px solid var(--faint);
+  width: 3px;
+  border-radius: 1.5px;
+}
+
+/* The key hint under the status. Mono because it is keys. */
+.tm-hint {
+  padding: 0 10px 7px;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+/* An action row. The ink term applies like every menu row in the app. */
+.tm-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: calc(5px - var(--ink-up-125)) 10px calc(5px + var(--ink-up-125));
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  /* 100ms hover — "faster because the pointer is already moving". */
+  transition: background-color 100ms ease-out;
+}
+
+.tm-item:hover:not(:disabled),
+.tm-item:focus-visible {
+  background: var(--sel);
+  outline: none;
+}
+
+.tm-item:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* The label shortens; the count never does. */
+.tm-item__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The right-hand column the design draws: line counts in 11px mono. A native
+   menu has no columns — this row grammar is why the app can draw its own
+   menu instead. */
+.tm-item__count {
+  margin-left: auto;
+  flex: none;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+/* Recents after the first go --muted, as the mock draws them; the newest and
+   every always-on action stay --text. */
+.tm-item[data-quiet="yes"] {
+  color: var(--muted);
+}
+
+.tm-item[data-quiet="yes"]:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* Where the line being spoken is going (recording state) — a readout row. */
+.tm-writing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.tm-writing .tm-item__count {
+  color: var(--faint);
+}
+
+.tm-section {
+  padding: 5px 10px 4px;
+  font: 600 9.5px var(--sans);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tm-sep {
+  height: 1px;
+  margin: 5px 10px;
+  background: var(--glass-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the fade, drop the movement. */
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes menu-out {
+    to {
+      opacity: 0;
+    }
+  }
+}

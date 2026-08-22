@@ -1,0 +1,93 @@
+[workspace]
+members = ["crates/sotone-core", "crates/sotone-hook", "src-tauri"]
+# `vendor/rdev` is our patched copy of rdev 0.5.3 (see the patch section at the
+# bottom of this file). It is deliberately NOT a member: keeping it out means
+# `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` apply to
+# Sotone's own code only, so vendored upstream style is neither reformatted nor
+# held to our lint bar.
+exclude = ["vendor/rdev"]
+# Virtual manifest, so the resolver version must be stated explicitly.
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.77"
+
+[workspace.dependencies]
+# Backend selection (vulkan / cpu / metal) is a compile-time feature on
+# sotone-core; whisper-rs's own backend features are switched from there.
+# `tracing_backend` is backend-independent and always on: without it,
+# whisper.cpp and ggml printf their logs straight to the console, and those
+# lines are the only place a silent Vulkan-to-CPU fallback shows up. It is a
+# feature flag on a dependency we already have, not a new crate.
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
+
+tauri = "2"
+tauri-build = "2"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+anyhow = "1"
+thiserror = "2"
+
+# Format-preserving TOML. The config file is the source of truth and hand-edits
+# must round-trip, so we need the document model, not a serialiser.
+toml_edit = "0.25"
+# Platform config/data dirs without hand-rolling %APPDATA% and XDG.
+dirs = "6"
+
+# Audio capture. Shared-mode WASAPI on Windows; no exclusive-mode path exists,
+# so we can never take the microphone away from the rest of the system.
+cpal = "0.18"
+# Lock-free SPSC ring between the cpal data callback and the capture worker.
+# The "callback enqueues and returns" invariant needs a wait-free,
+# allocation-free push; a mutex-guarded VecDeque cannot promise either.
+ringbuf = "0.5"
+# Native device rate (usually 48 kHz) down to whisper's 16 kHz.
+rubato = "4"
+# Global input hook for push-to-talk. Pinned exactly: the low-level hook
+# behaviour and the `Button::Unknown(1|2)` spelling for the mouse side buttons
+# are 0.5.3 specifics we depend on. Deliberately no features — `serialize` is
+# unnecessary (we own our token type) and `unstable_grab` is an
+# event-swallowing/synthesizing API that invariant 1 forbids.
+rdev = "=0.5.3"
+
+# The draft store is by definition a jsonl store with a JSON sidecar, so JSON is
+# the file format, not an implementation choice. Hand-rolling an encoder for a
+# file the user may hand-edit would be the risk, not the dependency.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Draft and line ids. Lexically sortable, so id order is creation order and the
+# outstanding-drafts list needs no separate sort key.
+ulid = "1"
+# RFC3339 timestamps carrying the local offset. Line timestamps are
+# supplied by the caller (captured at key release); the store only stamps draft
+# creation.
+chrono = { version = "0.4", features = ["serde"] }
+
+# Dev-only: temp dirs for filesystem tests.
+tempfile = "3"
+# Per-line wav in the draft store (16 kHz mono 16-bit PCM), and dev-only in the
+# mic_probe example, which dumps captured utterances so the human can listen for
+# the pre-roll.
+hound = "3"
+
+# rdev resolves to our vendored, patched copy — same name, same version, so the
+# `=0.5.3` pin above still means what it says. Two reasons it exists (full
+# writeup in `vendor/rdev/README-SOTONE.md`):
+#
+# 1. Upstream's Windows WH_KEYBOARD_LL callback translated every keypress on the
+#    machine to text, which does AttachThreadInput against the foreground
+#    window's thread. With Sotone's own (Tauri/WebView2) window in front that can
+#    deadlock our UI thread, the hook times out, and Windows silently drops the
+#    key event. Invariant 5, one layer below our code.
+# 2. `simulate` (SendInput and friends) and `grab` (event interception) are
+#    deleted from the source, so invariant 1 holds by absence rather than by our
+#    choosing not to call them.
+#
+# A path patch, not a git dependency: builds stay fully local and offline.
+[patch.crates-io]
+rdev = { path = "vendor/rdev" }

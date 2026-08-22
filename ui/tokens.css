@@ -1,0 +1,129 @@
+/* Sotone design tokens — v2, the lifted grayscale.
+   Modern macOS-style neutrals: dark mode sits in the #2a–#3a range (not
+   near-black), light mode is warm paper, and translucent "glass" surfaces
+   carry the frosted look for overlays and popovers.
+
+   Still no blue anywhere: every hex keeps red >= blue (grep-checkable).
+   Red is the one colour and it means one thing — a live recording, and the
+   errors that stop a note from being written. Everything else separates by
+   brightness, weight, and a hairline.
+
+   Dark is the default. Set data-theme="light" on the root to switch. */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* The window itself. */
+  --bg: #2a2928;
+  /* Raised surfaces: panels on the window, and panels on panels. */
+  --panel: #302f2d;
+  --panel-high: #343331;
+  /* Hairlines. Everything that separates two things is this. */
+  --line: #3e3d3a;
+  /* A brighter edge for the one thing waiting for an answer. */
+  --line-strong: #56544f;
+  /* Selection / hover fill. */
+  --sel: #393835;
+
+  --text: #f1f0ed;
+  --muted: #b4b2ab;
+  --dim: #8f8d85;
+  --faint: #757369;
+
+  /* The one colour. --live is a recording in progress; --bad is the same hue,
+     a shade deeper, for errors that stopped something happening. */
+  --live: #ff5f56;
+  --bad: #e8615a;
+  /* "You changed something this process cannot apply." Grayscale at full text
+     brightness, with a hairline doing the work. */
+  --warn: #e0ded8;
+
+  /* Glass: the frosted translucent surface for overlays, popovers, and the
+     always-on-top capture pill. Pair --glass with --glass-blur. */
+  --glass: rgba(44, 43, 41, 0.72);
+  --glass-blur: blur(24px) saturate(1.15);
+  --glass-line: rgba(255, 255, 255, 0.08);
+
+  /* The backdrop a popup dims the page with. */
+  --scrim: rgba(15, 15, 14, 0.6);
+
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.38), 0 1px 3px rgba(0, 0, 0, 0.3);
+
+  --radius: 10px;      /* cards, panels, popovers */
+  --radius-ctl: 9px;   /* buttons, inputs */
+
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Ink centring, defined here so every page shares one
+     definition — style.css, tray.css, and whoever comes next. Measured in
+     the real engine: with flex centring and line-height 1, glyph ink rides
+     low in the Segoe stack — the baseline lands 4.95px below the box centre
+     at 12.5px (want ~4.55) and 5.5px at 13px (want ~4.73). Boxed controls
+     subtract the token above and add it below, so border-box heights never
+     move. One number per font size, never a per-element hand-tune. */
+  --ink-up-125: 0.4px; /* 12.5px sans controls (and the 12px sort value) */
+  --ink-up-13: 0.75px; /* 13px sans controls */
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f7f6f3;
+  --panel: #f0efec;
+  --panel-high: #eae9e5;
+  --line: #e0dfda;
+  --line-strong: #c6c4bd;
+  --sel: #e8e7e2;
+
+  --text: #292825;
+  --muted: #6f6d66;
+  --dim: #8b8981;
+  --faint: #adaba3;
+
+  /* Same hue, driven darker so it carries on a light ground. */
+  --live: #d93a30;
+  --bad: #c53b33;
+  --warn: #3d3b36;
+
+  --glass: rgba(247, 246, 243, 0.72);
+  --glass-blur: blur(24px) saturate(1.15);
+  --glass-line: rgba(41, 40, 37, 0.1);
+
+  --scrim: rgba(41, 40, 37, 0.35);
+
+  --shadow: 0 8px 28px rgba(41, 40, 37, 0.16), 0 1px 3px rgba(41, 40, 37, 0.1);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Platform overrides                                                        */
+/*                                                                           */
+/* Everything above is shared; only radii and the system font stacks change   */
+/* per platform, exactly as the design's "Radii, spacing, elevation"          */
+/* and "Type" tables say. The file's own values are the macOS ones, so macOS  */
+/* deliberately has no block here.                                           */
+/*                                                                           */
+/* `data-platform` is set on <html> from the settings event, which carries    */
+/* the compile-time target — the webview is never asked to sniff a user       */
+/* agent. The markup ships with `windows` so the first paint, before any      */
+/* event has arrived, is not the macOS geometry on a Windows machine.         */
+/* ------------------------------------------------------------------------- */
+
+[data-platform="windows"] {
+  --radius: 8px;
+  --radius-ctl: 7px;
+
+  --sans: system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif;
+}
+
+[data-platform="linux"] {
+  --radius: 12px;
+  --radius-ctl: 8px;
+
+  --sans: system-ui, "Adwaita Sans", Cantarell, sans-serif;
+  /* The two faces a GNOME box actually has, ahead of the generic fallback.
+     The Windows faces stay in the list and simply never match there. */
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "Source Code Pro",
+    "DejaVu Sans Mono", monospace;
+}

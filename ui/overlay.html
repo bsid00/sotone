@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" data-platform="windows">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sotone overlay</title>
+    <!-- Same rules as index.html: every resource is local and same-origin, no
+         CDN, no webfont, nothing that reaches the network (invariant 3). The
+         script is external because 'unsafe-inline' is not on the CSP and is not
+         going to be.
+
+         The cache-buster is per file and changes whenever that file does: the
+         app has been seen serving a disk-cached sheet after an update. Bump
+         only the one whose file changed, so nothing else is re-fetched.
+
+         Tokens first, then the sheet that is nothing but `var(--…)`, exactly as
+         index.html does it — the palette does not exist in the other order. The
+         pill is drawn in the same tokens as the rest of the app, so
+         `--glass`, `--live` and `--shadow` are the design's values and not a
+         second copy of them. -->
+    <link rel="stylesheet" href="tokens.css?v=044" />
+    <link rel="stylesheet" href="overlay.css?v=032" />
+    <script src="overlay.js?v=032" defer></script>
+  </head>
+  <!-- No buttons, no links, nothing focusable, nothing draggable, no
+       contenteditable: this window is a readout and offers nothing to click.
+       A window that cannot be interacted with cannot ask for activation
+       (invariant 2), and `dragDropEnabled: false` on it keeps WebView2's own
+       file-drop handler out of the way as well.
+
+       The window itself is `transparent: true`: on Windows that
+       makes WebView2's background alpha 0 — and alpha is 0 or 255 there, never
+       in between — so the pill's 72% glass has to be the CSS `--glass` fill
+       painted over nothing. -->
+  <body>
+    <!-- The capture pill. Four states in one element:
+         `data-state` is idle | recording | waiting | reveal, and CSS owns every
+         difference between them — nothing here is ever `hidden`.
+         `data-corner` is the dock corner, which decides which edge the
+         glyph is pinned to and therefore which way the pill grows. -->
+    <div id="pill" class="pill" data-state="idle" data-corner="bottomLeft">
+      <!-- The logo: four bars, the drawn 2px/2px/5-10-7-4-in-11px scaled ×1.25
+           to 2.5px wide, 2.5px apart, heights 6/13/9/5 in a 14px
+           box. The same four the title bar's indicator and the app icon use. In
+           the recording state these are the VU meter — the bars do not change
+           identity, only colour and height. -->
+      <span class="pill__glyph" aria-hidden="true">
+        <i></i><i></i><i></i><i></i>
+      </span>
+
+      <!-- Recording: the elapsed clock, counted in this window
+           (a tick per second is not worth an IPC round trip). -->
+      <span class="pill__rec">
+        <span id="elapsed" class="pill__clock">00:00</span>
+      </span>
+
+      <!-- Reveal: timestamp first, then the line, on the same glass. -->
+      <span class="pill__reveal">
+        <span id="stamp" class="pill__stamp"></span>
+        <span id="line" class="pill__text"></span>
+      </span>
+
+      <!-- The auto-collapse timer, drawn as a hairline that drains linearly
+           over the reveal duration (the one linear motion in the app besides a
+           download's progress). -->
+      <span class="pill__drain" aria-hidden="true"><i id="drain"></i></span>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "sotone-hook"
+description = "Sotone's global input hook, in a process of its own. Observes two bindings and reports them to the Sotone process over a pipe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The only dependency, and only for `hotkey::{Binding, Bindings, HotkeyListener,
+# PttEvent, wire}` — the bindings vocabulary, the hook, and the wire format all
+# have to be exactly the ones the parent uses, so they are shared rather than
+# restated here. The vendored rdev (no `simulate`, no `grab`) comes with it.
+#
+# No features, deliberately: sotone-core has no defaults, so this pulls in no
+# whisper backend and therefore no whisper.cpp. That is what keeps this binary
+# single-digit megabytes. Note that a workspace-wide
+# `--features vulkan` build still unifies the feature back in — the slim artifact
+# comes from its own `cargo build -p sotone-hook --release`.
+sotone-core = { path = "../sotone-core" }

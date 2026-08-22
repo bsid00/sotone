@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Sotone app icon, master asset.
+       Grayscale wordmark: a geometric S over a murmur of small bars — the
+       word over the quiet voice. The S is built from two 225-degree arcs,
+       not a font glyph, so rasterization never depends on font resolution.
+       Rasterize with `cargo tauri icon assets/icon.svg`. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="#1f1e1c"/>
+  <path d="M 591 258 A 112 112 0 1 0 512 449 A 112 112 0 1 1 433 640"
+        fill="none" stroke="#ecebe7" stroke-width="88" stroke-linecap="round"/>
+  <g stroke="#7c7b75" stroke-width="40" stroke-linecap="round">
+    <line x1="320" y1="798" x2="320" y2="842"/>
+    <line x1="416" y1="770" x2="416" y2="870"/>
+    <line x1="512" y1="790" x2="512" y2="850"/>
+    <line x1="608" y1="760" x2="608" y2="880"/>
+    <line x1="704" y1="790" x2="704" y2="850"/>
+  </g>
+</svg>

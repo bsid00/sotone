@@ -1,0 +1,369 @@
+/* The overlay window's own sheet: the capture pill.
+   Deliberately not style.css, which is three thousand lines about a
+   window this one shares nothing with — but the *tokens* are shared now
+   (tokens.css is loaded first), so the glass, the red and the shadow here are
+   the design's own values rather than a second copy of them that could drift.
+
+   Two facts about this window shape the whole file:
+
+   1. `transparent: true` on Windows means WebView2's background alpha is 0, and
+      alpha there is 0 or 255 with nothing in between. So the pill's 72% frosted
+      surface is `--glass` painted over a hole, not a translucent window.
+   2. `backdrop-filter` samples what is *behind the element inside this page*,
+      and behind the pill there is nothing at all. `--glass-blur` is therefore
+      deliberately absent: shipping it would be a no-op that implies the drawn
+      blur is happening. **Deviation on record: the design's glass blurs what is
+      behind it; ours tints.** Real backdrop blur would mean acrylic/mica, which
+      carry documented performance warnings and no data at all about
+      compositing continuously over a running game.
+
+   System fonts only: no webfont means no network request (invariant 3). */
+
+:root {
+  /* The pill's geometry. These four numbers are also in src-tauri/src/shell.rs
+     (PILL_HEIGHT, PILL_WIDTH_*, OVERLAY_SHADOW_MARGIN): the window is sized to
+     hug whichever state is showing, because a transparent window still eats
+     clicks over the thing being tested, and CSS animates the width *inside* a
+     window that is already big enough. They must move together.
+
+     **Scaled ×1.25** (30/36/92/420 → 38/45/115/525): at the original size the
+     pill was too small to read at a glance while a game had the user's
+     attention. Everything else in this file is the same 1.25 — fonts,
+     paddings, the glyph — so the drawn proportions survive the change; only the
+     bar heights round to whole pixels (see below). The factor is the only
+     number here that is a judgment call rather than a measurement. */
+  --pill-h: 38px;
+  --pill-w-idle: 45px;
+  --pill-w-rec: 115px;
+  --pill-w-reveal: 525px;
+  /* Room for `--shadow` to fall into, and the reason the window sits flush in
+     the work area's corner while the pill lands the design's 18px in. */
+  --pill-margin: 18px;
+
+  /* The motion table, once, so a change argues with one line. */
+  --pill-grow: 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  --pill-fade: 140ms ease-out;
+  /* How long the reveal hairline takes to drain. Replaced from the settings
+     event; the fallback is the config default. */
+  --reveal-dur: 10s;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  position: relative;
+  /* The window is transparent: everything outside the pill is the thing under
+     test, showing through. */
+  background: transparent;
+  color: var(--text);
+  /* 12.5px ×1.25. The line the reveal shows inherits this. */
+  font: 15.5px/1.35 var(--sans);
+  /* Nothing here is meant to be selected, dragged or right-clicked into a
+     context menu: it is a readout, not a document. */
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The pill                                                                  */
+/*                                                                           */
+/* One element, four states, and the anchored corner decides which edge is    */
+/* pinned — so growing the width moves the far edge and never the corner one. */
+/* ------------------------------------------------------------------------- */
+
+.pill {
+  position: absolute;
+  height: var(--pill-h);
+  width: var(--pill-w-idle);
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--shadow);
+  /* The content sits in a row that is wider than the idle pill; clipping it is
+     what makes the growth read as the pill revealing its contents. */
+  overflow: hidden;
+  transition: width var(--pill-grow);
+}
+
+/* The dock corner. `inset` on two sides only: the two that touch the corner
+   are pinned, the other two are whatever the width leaves. */
+.pill[data-corner="bottomLeft"] {
+  bottom: var(--pill-margin);
+  left: var(--pill-margin);
+}
+
+.pill[data-corner="bottomRight"] {
+  bottom: var(--pill-margin);
+  right: var(--pill-margin);
+}
+
+.pill[data-corner="topLeft"] {
+  top: var(--pill-margin);
+  left: var(--pill-margin);
+}
+
+.pill[data-corner="topRight"] {
+  top: var(--pill-margin);
+  right: var(--pill-margin);
+}
+
+/* The three widths the motion table's 260ms runs between. `waiting` — the gap
+   between a release and the line arriving — is deliberately the recording
+   width: the pill stays expanded with its bars at rest rather than collapsing
+   and immediately growing again. */
+.pill[data-state="recording"],
+.pill[data-state="waiting"] {
+  width: var(--pill-w-rec);
+}
+
+.pill[data-state="reveal"] {
+  width: var(--pill-w-reveal);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The glyph, which is also the VU meter                                     */
+/* ------------------------------------------------------------------------- */
+
+.pill__glyph {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  /* 2px and an 11px box ×1.25: the four bars and their three gaps
+     come to 17.5px, which is 14px × 1.25 — the glyph keeps its share of the
+     wider pill rather than sitting in it looking lost. */
+  gap: 2.5px;
+  height: 14px;
+  /* Armed and idle. The indicator's crossfade duration, so the two surfaces
+     change colour at the same speed (design motion table). */
+  color: var(--dim);
+  transition: color 160ms ease-out;
+}
+
+/* The anchored edge: the glyph is what the pill grows out of, so it sits at
+   the corner side and everything else appears beside it. */
+.pill[data-corner$="Left"] .pill__glyph {
+  left: 12.5px;
+}
+
+.pill[data-corner$="Right"] .pill__glyph {
+  right: 12.5px;
+}
+
+/* The only red on the pill, and only while audio is being captured. */
+.pill[data-state="recording"] .pill__glyph {
+  color: var(--live);
+}
+
+.pill__glyph i {
+  width: 2.5px;
+  border-radius: 1.25px;
+  background: currentColor;
+  transform-origin: center;
+  /* `--vu` is set per bar from `sotone://level`; 1 is the logo's own height,
+     which is also the rest position. The bars ease to rest over 200ms when a
+     recording stops (motion table) — they never stop mid-stride. */
+  transform: scaleY(var(--vu, 1));
+  transition: transform 200ms ease-out;
+}
+
+/* While recording they follow the microphone rather than easing: a meter that
+   lagged a fifth of a second behind the voice would read as broken. */
+.pill[data-state="recording"] .pill__glyph i {
+  transition-duration: 90ms;
+}
+
+/* The logo's own proportions (design "Assets"): 2px wide, 2px apart, heights
+   5/10/7/4 in an 11px box — here ×1.25 and rounded to whole pixels, 6/13/9/5 in
+   a 14px box. Whole pixels rather than the exact 6.25/12.5/8.75/5,
+   because a bar is a 2.5px rectangle of solid colour and a fractional height is
+   the one place this glyph goes soft; the order and the silhouette are what
+   make it the logo, and both survive the rounding. */
+.pill__glyph i:nth-child(1) {
+  height: 6px;
+}
+
+.pill__glyph i:nth-child(2) {
+  height: 13px;
+}
+
+.pill__glyph i:nth-child(3) {
+  height: 9px;
+}
+
+.pill__glyph i:nth-child(4) {
+  height: 5px;
+}
+
+/* The listen-ACL failure, made visible: hollow bars,
+   the same treatment the design gives a disabled tray glyph. The pill cannot
+   say more than this — it is 45px wide when nothing is happening, and it has no
+   command with which to ask for more room. */
+.pill[data-state="unavailable"] .pill__glyph i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--faint);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The two content groups                                                    */
+/*                                                                           */
+/* Absolutely positioned rather than in flow, so neither can push the other   */
+/* sideways as it fades: the crossfade is 140ms behind a 260ms width change,  */
+/* and a reflow in the middle of that is exactly what makes a pill look       */
+/* cheap.                                                                    */
+/* ------------------------------------------------------------------------- */
+
+.pill__rec,
+.pill__reveal {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12.5px;
+  opacity: 0;
+  transition: opacity var(--pill-fade);
+  /* A readout, never a target. */
+  pointer-events: none;
+}
+
+/* 34px ×1.25: the glyph ends at 12.5 + 17.5 = 30px, so the content
+   still starts 12.5px past it — the same gap the row uses between its own
+   parts. */
+.pill[data-corner$="Left"] .pill__rec,
+.pill[data-corner$="Left"] .pill__reveal {
+  left: 42.5px;
+}
+
+/* Mirrored: the content runs away from the glyph, which is now on the right. */
+.pill[data-corner$="Right"] .pill__rec,
+.pill[data-corner$="Right"] .pill__reveal {
+  right: 42.5px;
+  flex-direction: row-reverse;
+}
+
+.pill[data-state="recording"] .pill__rec,
+.pill[data-state="waiting"] .pill__rec {
+  opacity: 1;
+}
+
+.pill[data-state="reveal"] .pill__reveal {
+  opacity: 1;
+}
+
+/* Mono: it is a clock. Tabular figures so the pill does not shimmer as the
+   seconds tick. */
+.pill__clock {
+  font: 14.5px var(--mono);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Mono, and first: the timestamp is the fact that makes the line a note. */
+.pill__stamp {
+  font: 14px var(--mono);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* One line, ever, and a fixed width because the window is a fixed width: the
+   three together are what make an over-long finding ellipsise rather than run
+   out of the pill. It is a glance, not a transcript — the transcript is one
+   alt-tab away. */
+.pill__text {
+  width: 375px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The collapse timer                                                        */
+/* ------------------------------------------------------------------------- */
+
+/* Flush to the bottom edge, and the *shape* is what insets it. Drawn inset by
+   hand, the hairline sat too close to the elapsed counter to
+   read as a separate thing. It now spans the full width at `bottom: 0` — which
+   is the inner edge of the pill's 1px border, since the insets of an absolutely
+   positioned child are measured from the padding box — and `.pill`'s
+   `overflow: hidden` clips it to the rounded corners, so the ends stop exactly
+   where the radius begins instead of poking out of it. That clip is why there
+   are no hand-tuned 15px insets any more: they were an approximation of a curve
+   the browser can compute, and they would have had to be re-approximated at
+   every scale change.
+
+   Height 2px (1.5 ×1.25). Nothing about the motion changed: the drain is still
+   the linear countdown below, still `--reveal-dur` long. */
+.pill__drain {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--glass-line);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity var(--pill-fade);
+}
+
+.pill[data-state="reveal"] .pill__drain {
+  opacity: 1;
+}
+
+.pill__drain i {
+  display: block;
+  height: 100%;
+  background: var(--line-strong);
+  /* Linear, and the reveal duration exactly: this hairline *is* the timer, so
+     anything eased would be a lie about how long is left. Paused unless the
+     pill is revealing, so an idle window composits nothing; overlay.js restarts
+     it on every line, because each new line restarts the timer. */
+  animation: drain var(--reveal-dur) linear forwards;
+  animation-play-state: paused;
+}
+
+.pill[data-state="reveal"] .pill__drain i {
+  animation-play-state: running;
+}
+
+@keyframes drain {
+  from {
+    width: 100%;
+  }
+
+  to {
+    width: 0%;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  /* The design's rule: keep every opacity crossfade at the same duration, drop
+     the movement. The width change and the bars are movement — the state is
+     carried by the colour, the content and the clock without them. */
+  .pill {
+    transition: none;
+  }
+
+  .pill__glyph i {
+    transform: none;
+    transition: none;
+  }
+}

@@ -1,0 +1,34 @@
+/target
+**/target/
+**/*.rs.bk
+node_modules/
+dist/
+
+# Tauri build output
+/src-tauri/target
+/src-tauri/gen
+# The staged sidecar: a copy of a built sotone-hook.exe that
+# `tools/bundle/prepare_sidecar.ps1` regenerates on every build. Committing a
+# binary that must match the build it ships with is how stale sidecars happen.
+/src-tauri/binaries/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Never commit model weights — none ship with this project (invariant 6).
+*.bin
+models/
+
+# Local scratch
+/drafts
+*.local.toml
+
+# Locally dictated notes (user files, not project
+# files). Ignored rather than merely untracked so UIs stop counting them as
+# pending changes; delete this line if they should ever be tracked.
+/Notes From User/
+
+# Machine-local cargo config (short target dir for Windows MAX_PATH, env paths)
+/.cargo/config.toml
