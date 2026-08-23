@@ -10,6 +10,8 @@ timestamped line to a markdown file. It never types into the program you are
 testing, and nothing is sent online. When you are done, you give the file to
 your coding agent and it fixes what you found.
 
+![A Sotone session: the key is held, the pill shows the recording clock, and the line lands in the note](assets/demo.gif)
+
 > **Status: pre-alpha.** There is a Windows installer on the
 > [Releases](https://github.com/bsid00/sotone/releases) page, unsigned for now.
 > It has only ever been run on Windows. Linux and macOS builds compile in CI
